@@ -40,6 +40,15 @@ TERM.banner = `
 
 Welcome. Type 'help' for commands, or 'ls' to look around.`;
 
+// Compact banner for narrow screens (phones). The full banner is ~70 cols and
+// only the left half would show. Keep this under ~30 cols.
+TERM.bannerNarrow = `
+┌────────────────────────┐
+│   C H R I S  D U Z A N │
+└────────────────────────┘
+
+Type 'help' or 'ls'.`;
+
 // --- FAKE FILESYSTEM --------------------------------------------------------
 // Tree of nodes. A node is one of:
 //   { type: "dir",  children: { name: node, ... } }

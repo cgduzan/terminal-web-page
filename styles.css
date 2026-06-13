@@ -102,6 +102,7 @@ body {
 .window {
   position: relative; /* anchors the CRT scanline overlay (body.crt ::after) */
   height: calc(100vh - 32px);
+  height: calc(100dvh - 32px); /* dvh tracks mobile browser chrome; vh fallback above */
   display: flex;
   flex-direction: column;
   border-radius: 8px;
@@ -163,6 +164,23 @@ body {
 .line {
   white-space: pre-wrap;
   word-break: break-word;
+}
+
+/* wide pre-formatted output (banner, neofetch, tree, weather): scroll instead
+   of wrap-breaking the alignment. No-op on desktop where it already fits. */
+.line.block {
+  white-space: pre;
+  word-break: normal;
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+}
+
+.line.block::-webkit-scrollbar {
+  height: 6px;
+}
+.line.block::-webkit-scrollbar-thumb {
+  background: var(--dim);
+  border-radius: 3px;
 }
 
 .dim {
@@ -401,16 +419,31 @@ body.crt .window::after {
 
 /* mobile */
 @media (max-width: 768px) {
+  /* iOS Safari auto-zooms when focusing an input under 16px, so the input must
+     be >=16px. Keep the whole UI at 16px (not a split size) so the prompt line
+     doesn't visually jump from the output — wide content scrolls via .block. */
   body {
-    font-size: 13px;
+    font-size: 16px;
     padding: 0;
   }
   .window {
     height: 100vh;
+    height: 100dvh; /* avoids the URL bar clipping the input line */
     border-radius: 0;
     border: none;
   }
   .titlebar .title {
     display: none;
+  }
+  /* full-bleed: keep content clear of the notch / home indicator */
+  .titlebar {
+    padding-left: max(12px, env(safe-area-inset-left));
+    padding-right: max(12px, env(safe-area-inset-right));
+    padding-top: max(8px, env(safe-area-inset-top));
+  }
+  #screen {
+    padding-left: max(16px, env(safe-area-inset-left));
+    padding-right: max(16px, env(safe-area-inset-right));
+    padding-bottom: max(16px, env(safe-area-inset-bottom));
   }
 }

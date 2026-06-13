@@ -200,7 +200,7 @@ TERM.commands = {
         });
       };
       walk(node, "");
-      return lines.join("\n");
+      ctx.printBlock(lines.join("\n"));
     },
   },
 
@@ -290,7 +290,7 @@ TERM.commands = {
         const n = info[r] || "";
         out.push(l + n);
       }
-      return out.join("\n");
+      ctx.printBlock(out.join("\n"));
     },
   },
 
@@ -316,20 +316,20 @@ TERM.commands = {
 
   banner: {
     desc: "Print the banner",
-    run() {
-      return TERM.banner;
+    run(_args, ctx) {
+      ctx.printBlock(ctx.term.pickBanner());
     },
   },
 
   weather: {
     desc: "Show the weather (via wttr.in)",
     usage: "weather [location]",
-    async run(args) {
+    async run(args, ctx) {
       const loc = encodeURIComponent(args.join(" "));
       try {
         const res = await fetch(`https://wttr.in/${loc}?ATm`);
         if (!res.ok) return `weather: request failed (${res.status})`;
-        return (await res.text()).trimEnd();
+        ctx.printBlock((await res.text()).trimEnd());
       } catch (e) {
         return "weather: could not reach wttr.in (offline?)";
       }

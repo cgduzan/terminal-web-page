@@ -194,6 +194,22 @@
       this.scrollToBottom();
     }
 
+    // wide pre-formatted output that should scroll horizontally rather than
+    // wrap-break (ASCII art, aligned columns) — see .line.block in styles.css
+    printBlock(text) {
+      const div = document.createElement("div");
+      div.className = "line block";
+      div.textContent = text == null ? "" : String(text);
+      this.output.appendChild(div);
+      this.scrollToBottom();
+    }
+
+    // narrow screens get a compact banner; full banner would wrap/scroll ugly
+    pickBanner() {
+      const narrow = window.matchMedia("(max-width: 768px)").matches;
+      return (narrow && TERM.bannerNarrow) || TERM.banner;
+    }
+
     echoCommand(raw) {
       const div = document.createElement("div");
       div.className = "line";
@@ -385,6 +401,7 @@
       const ctx = {
         print: (t) => this.printLine(t),
         printHTML: (h) => this.printHTMLLine(h),
+        printBlock: (t) => this.printBlock(t),
         esc: escapeHtml,
         term: this,
       };
@@ -730,7 +747,7 @@
       window.removeEventListener("keydown", skip);
 
       if (lastLogin) this.printLine(`Last login: ${lastLogin}`);
-      this.printLine(TERM.banner);
+      this.printBlock(this.pickBanner());
 
       // reveal the prompt and focus
       this.refreshPrompt();
