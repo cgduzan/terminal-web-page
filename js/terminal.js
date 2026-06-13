@@ -46,6 +46,7 @@
 
       this.initTheme();
       this.bindInput();
+      this.bindKonami();
 
       // reflect the resolved host in the window title bar
       const titleEl = document.querySelector(".titlebar .title");
@@ -64,6 +65,50 @@
     setTheme(name) {
       document.body.dataset.theme = name;
       localStorage.setItem("theme", name);
+    }
+
+    // --- misc helpers exposed to commands ----------------------------------
+
+    // shared PRNG so command handlers avoid Math.random lint noise
+    random() {
+      return pseudoRandom();
+    }
+
+    delay(ms) {
+      return new Promise((res) => setTimeout(res, ms));
+    }
+
+    // Build a fullscreen overlay that any key or click dismisses. The
+    // dismissing key is caught in the capture phase and swallowed so it
+    // doesn't type into the input. Returns close(). opts: { autoMs, onClose,
+    // delayMs }. Used by matrix(), hack(), and the locked-file bit can reuse.
+    overlay(node, opts = {}) {
+      const { autoMs, onClose, delayMs = 120 } = opts;
+      document.body.appendChild(node);
+      let dismissed = false;
+      let autoTimer = null;
+      const onKey = (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        close();
+      };
+      const close = () => {
+        if (dismissed) return;
+        dismissed = true;
+        if (autoTimer) clearTimeout(autoTimer);
+        window.removeEventListener("keydown", onKey, true);
+        node.removeEventListener("click", close);
+        node.remove();
+        if (onClose) onClose();
+        this.focus();
+      };
+      // delay binding so the keypress that triggered this doesn't close it
+      setTimeout(() => {
+        window.addEventListener("keydown", onKey, true);
+        node.addEventListener("click", close);
+      }, delayMs);
+      if (autoMs) autoTimer = setTimeout(close, autoMs);
+      return close;
     }
 
     // --- filesystem helpers ------------------------------------------------
@@ -462,54 +507,165 @@
 
     matrix() {
       if (document.querySelector(".matrix-overlay")) return;
-      const overlay = document.createElement("canvas");
-      overlay.className = "matrix-overlay";
-      document.body.appendChild(overlay);
-      const ctx = overlay.getContext("2d");
-      const resize = () => {
-        overlay.width = window.innerWidth;
-        overlay.height = window.innerHeight;
-      };
-      resize();
+      const canvas = document.createElement("canvas");
+      canvas.className = "matrix-overlay";
+      let raf;
+      this.overlay(canvas, {
+        autoMs: 8000,
+        onClose: () => cancelAnimationFrame(raf),
+      });
+      const ctx = canvas.getContext("2d");
+      canvas.width = window.innerWidth;
+      canvas.height = window.innerHeight;
       const chars = "アイウエオカキクケコサシスセソ01010101".split("");
       const fontSize = 16;
-      let cols = Math.floor(overlay.width / fontSize);
-      let drops = new Array(cols).fill(1);
-      let raf;
+      const cols = Math.floor(canvas.width / fontSize);
+      const drops = new Array(cols).fill(1);
       const draw = () => {
         ctx.fillStyle = "rgba(0,0,0,0.06)";
-        ctx.fillRect(0, 0, overlay.width, overlay.height);
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
         ctx.fillStyle = "#0f0";
         ctx.font = fontSize + "px monospace";
         for (let i = 0; i < drops.length; i++) {
           const ch = chars[Math.floor(pseudoRandom() * chars.length)];
           ctx.fillText(ch, i * fontSize, drops[i] * fontSize);
-          if (drops[i] * fontSize > overlay.height && pseudoRandom() > 0.975)
+          if (drops[i] * fontSize > canvas.height && pseudoRandom() > 0.975)
             drops[i] = 0;
           drops[i]++;
         }
         raf = requestAnimationFrame(draw);
       };
-      draw();
-      const stop = () => {
-        cancelAnimationFrame(raf);
-        overlay.remove();
-        window.removeEventListener("keydown", onKey, true);
-        window.removeEventListener("click", stop);
-        this.focus();
-      };
-      // swallow the dismissing key so it doesn't also type into the input
-      const onKey = (e) => {
-        e.preventDefault();
-        e.stopPropagation();
-        stop();
-      };
       this.printLine("Wake up, Neo... (press any key to exit)");
-      setTimeout(() => {
-        window.addEventListener("keydown", onKey, true);
-        window.addEventListener("click", stop);
-      }, 100);
-      setTimeout(stop, 8000);
+      draw();
+    }
+
+    // `sl` — a steam locomotive chugs across the screen (the classic `ls`
+    // typo gag). Pure CSS animation; respects reduced motion.
+    steamLocomotive() {
+      if (reducedMotion) {
+        this.printLine(TRAIN);
+        return;
+      }
+      if (document.querySelector(".sl-train")) return;
+      const pre = document.createElement("pre");
+      pre.className = "sl-train";
+      pre.textContent = TRAIN;
+      pre.addEventListener("animationend", () => pre.remove());
+      document.body.appendChild(pre);
+    }
+
+    // `hack` — Hollywood hacking: a stream of cascading hex, then a big
+    // "ACCESS GRANTED". Dismiss with any key/click or it auto-closes.
+    hack(target) {
+      if (document.querySelector(".hack-overlay")) return;
+      const overlay = document.createElement("div");
+      overlay.className = "hack-overlay";
+      const stream = document.createElement("pre");
+      stream.className = "hack-stream";
+      const granted = document.createElement("div");
+      granted.className = "hack-granted";
+      granted.textContent = "ACCESS GRANTED";
+      overlay.appendChild(stream);
+      overlay.appendChild(granted);
+
+      const HEX = "0123456789ABCDEF";
+      const row = () => {
+        let s = "";
+        for (let i = 0; i < 64; i++) s += HEX[Math.floor(this.random() * 16)];
+        return s;
+      };
+      const tick = () => {
+        const lines = (stream.textContent + row() + "\n").split("\n");
+        stream.textContent = lines.slice(-120).join("\n");
+        stream.scrollTop = stream.scrollHeight;
+      };
+
+      const interval = setInterval(tick, 45);
+      const reveal = setTimeout(() => {
+        granted.classList.add("show");
+        beep();
+      }, 2200);
+
+      const label = target ? ` ${target}` : "";
+      this.printLine(`Hacking${label}... (press any key to abort)`);
+      this.overlay(overlay, {
+        autoMs: 5200,
+        onClose: () => {
+          clearInterval(interval);
+          clearTimeout(reveal);
+        },
+      });
+    }
+
+    // `rm -rf /` gag — fake "deleting everything" progress, then "just
+    // kidding". Returns a promise the command awaits.
+    async fakeDelete() {
+      const targets = [
+        "/bin",
+        "/boot",
+        "/etc",
+        "/home/guest",
+        "/lib",
+        "/usr",
+        "/var",
+        "the last 10 years of your photos",
+        "your will to live",
+      ];
+      this.printLine("rm: descending into / — this cannot be undone.");
+      const line = document.createElement("div");
+      line.className = "line";
+      this.output.appendChild(line);
+      for (const t of targets) {
+        line.textContent = `removing ${t} ...`;
+        this.scrollToBottom();
+        await this.delay(reducedMotion ? 0 : 900);
+      }
+      line.textContent = "removing / ... 100%";
+      await this.delay(reducedMotion ? 0 : 1200);
+      this.printLine("");
+      this.printLine(
+        "just kidding 😅  it's a fake filesystem — nothing was harmed."
+      );
+    }
+
+    // Konami code (↑↑↓↓←→←→ B A) toggles a CRT scanline effect.
+    bindKonami() {
+      const seq = [
+        "ArrowUp",
+        "ArrowUp",
+        "ArrowDown",
+        "ArrowDown",
+        "ArrowLeft",
+        "ArrowRight",
+        "ArrowLeft",
+        "ArrowRight",
+        "b",
+        "a",
+      ];
+      let buf = [];
+      window.addEventListener("keydown", (e) => {
+        const k = e.key.length === 1 ? e.key.toLowerCase() : e.key;
+        buf.push(k);
+        if (buf.length > seq.length) buf = buf.slice(-seq.length);
+        if (buf.length === seq.length && seq.every((s, i) => s === buf[i])) {
+          buf = [];
+          this.toggleCRT();
+        }
+      });
+    }
+
+    toggleCRT() {
+      const on = document.body.classList.toggle("crt");
+      beep();
+      this.printLine(
+        on ? "CRT mode engaged ▒▓█ (Konami code accepted)" : "CRT mode off."
+      );
+      this.scrollToBottom();
+      // clear the trailing "ba" that typed into the input as part of the code
+      requestAnimationFrame(() => {
+        this.input.value = "";
+        this.renderInput();
+      });
     }
 
     // --- boot --------------------------------------------------------------
@@ -599,6 +755,18 @@
   }
 
   // --- small utilities -------------------------------------------------------
+
+  // the classic `sl` steam locomotive (D51). String.raw keeps the backslashes.
+  const TRAIN = String.raw`      ====        ________                ___________
+  _D _|  |_______/        \__I_I_____===__|_________|
+   |(_)---  |   H\________/ |   |        =|___ ___|
+   /     |  |   H  |  |     |   |         ||_| |_||
+  |      |  |   H  |__--------------------| [___] |
+  | ________|___H__/__|_____/[][]~\_______|       |
+  |/ |   |-----------I_____I [][] []  D   |=======|__
+__/ =| o |=-~~\  /~~\  /~~\  /~~\ ____Y___________|__
+ |/-=|___|=    ||    ||    ||    |_____/~\___/
+  \_/      \O=====O=====O=====O_/      \_/`;
 
   function longestCommonPrefix(strs) {
     if (!strs.length) return "";

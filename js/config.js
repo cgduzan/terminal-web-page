@@ -202,3 +202,25 @@ TERM.eggs = {
   jurassicParkGif: "assets/nedry.gif",
   jurassicParkAudio: "assets/nedry.mp3",
 };
+
+// --- FORTUNES ---------------------------------------------------------------
+// One-liners for the `fortune` command. Write your own — keep them original
+// (no copyrighted quotes). Add as many as you like.
+
+TERM.fortunes = [
+  "There is no place like 127.0.0.1.",
+  "Real programmers count from 0.",
+  "You will write a bug today. You will fix it tomorrow. The day after, you will reintroduce it.",
+  "A good commit message is a love letter to your future self.",
+  "\"It works on my machine\" is not a deployment strategy.",
+  "You are in a maze of twisty little dependencies, all alike.",
+  "The best code is the code you never had to write.",
+  "Today's forecast: 100% chance of merge conflicts.",
+  "Premature optimization is the root of a fun afternoon.",
+  "git push --force is a personality, not a command.",
+  "Your tests pass. Be suspicious.",
+  "Caffeine: the original package manager for humans.",
+  "The cake is a lie, but the stack trace never is.",
+  "rm -rf is forever. This filesystem is not.",
+  "Weeks of coding can save you hours of planning.",
+];

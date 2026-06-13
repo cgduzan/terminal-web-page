@@ -341,9 +341,143 @@ TERM.commands = {
   sudo: {
     desc: "Execute a command as superuser",
     hidden: true,
-    run(args) {
+    run(args, ctx) {
+      // let `sudo rm -rf /` reach the rm gag instead of a generic deny
+      if (args[0] === "rm") return TERM.commands.rm.run(args.slice(1), ctx);
       const cmd = args.join(" ") || "su";
       return `${TERM.identity.user} is not in the sudoers file. This incident will be reported.\n(nice try — '${cmd}' denied)`;
+    },
+  },
+
+  rm: {
+    desc: "Remove files",
+    usage: "rm [-rf] <path>",
+    hidden: true,
+    run(args, ctx) {
+      const flags = args.filter((a) => a.startsWith("-")).join("");
+      const target = args.find((a) => !a.startsWith("-"));
+      const recursiveForce = flags.includes("r") && flags.includes("f");
+      const roots = ["/", "/*", "~", "~/*", "."];
+      if (recursiveForce && roots.includes(target)) return ctx.term.fakeDelete();
+      if (!target) return "rm: missing operand";
+      return `rm: cannot remove '${target}': Read-only file system (nice try)`;
+    },
+  },
+
+  sl: {
+    desc: "Steam locomotive (you meant 'ls')",
+    hidden: true,
+    run(_args, ctx) {
+      ctx.term.steamLocomotive();
+    },
+  },
+
+  hack: {
+    desc: "Hack the mainframe",
+    usage: "hack [target]",
+    hidden: true,
+    run(args, ctx) {
+      ctx.term.hack(args.join(" "));
+    },
+  },
+
+  fortune: {
+    desc: "Print a random fortune",
+    hidden: true,
+    run(_args, ctx) {
+      const list = TERM.fortunes || [];
+      if (!list.length) return "fortune: the cookie is empty.";
+      return list[Math.floor(ctx.term.random() * list.length)];
+    },
+  },
+
+  cowsay: {
+    desc: "An ASCII cow says something",
+    usage: "cowsay <text>",
+    hidden: true,
+    run(args) {
+      const text = args.join(" ") || "Moo.";
+      const width = 40;
+      const lines = [];
+      let cur = "";
+      for (const w of text.split(/\s+/)) {
+        if (cur && (cur + " " + w).length > width) {
+          lines.push(cur);
+          cur = w;
+        } else {
+          cur = cur ? cur + " " + w : w;
+        }
+      }
+      if (cur) lines.push(cur);
+      if (!lines.length) lines.push("");
+      const max = Math.max(...lines.map((l) => l.length));
+      const top = " " + "_".repeat(max + 2);
+      const bottom = " " + "-".repeat(max + 2);
+      let body;
+      if (lines.length === 1) {
+        body = `< ${lines[0]} >`;
+      } else {
+        body = lines
+          .map((l, i) => {
+            const left = i === 0 ? "/" : i === lines.length - 1 ? "\\" : "|";
+            const right = i === 0 ? "\\" : i === lines.length - 1 ? "/" : "|";
+            return `${left} ${l.padEnd(max)} ${right}`;
+          })
+          .join("\n");
+      }
+      const cow = [
+        "        \\   ^__^",
+        "         \\  (oo)\\_______",
+        "            (__)\\       )\\/\\",
+        "                ||----w |",
+        "                ||     ||",
+      ].join("\n");
+      return `${top}\n${body}\n${bottom}\n${cow}`;
+    },
+  },
+
+  top: {
+    desc: "Display running processes",
+    hidden: true,
+    run(_args, ctx) {
+      const procs = [
+        ["1", "guest", "coffee-daemon"],
+        ["42", "guest", "existential-dread"],
+        ["1337", "root", "definitely-not-mining-crypto"],
+        ["2001", "guest", "spinning-up-hopes"],
+        ["8086", "guest", "node_modules-indexer"],
+        ["9000", "guest", "over-engineering.service"],
+        ["404", "guest", "motivation"],
+      ];
+      const header =
+        "top - up 42 days,  4:20,  1 user,  load average: 0.42, 0.69, 1.33";
+      const tasks = `Tasks: ${procs.length} total, ${procs.length} running, 0 useful`;
+      const cpuLine = "%Cpu(s): caffeine 73.0, productivity 12.0, meetings 15.0";
+      const cols = "  PID USER      %CPU %MEM  COMMAND";
+      const rows = procs
+        .map(([pid, user, cmd]) => {
+          const cpu = (ctx.term.random() * 100).toFixed(1).padStart(5);
+          const mem = (ctx.term.random() * 30).toFixed(1).padStart(5);
+          return `${pid.padStart(5)} ${user.padEnd(8)} ${cpu} ${mem}  ${cmd}`;
+        })
+        .join("\n");
+      return `${header}\n${tasks}\n${cpuLine}\n\n${cols}\n${rows}\n\n(press q... oh wait, it already exited)`;
+    },
+  },
+
+  htop: {
+    desc: "Display running processes (prettier)",
+    hidden: true,
+    run(args, ctx) {
+      return TERM.commands.top.run(args, ctx);
+    },
+  },
+
+  crt: {
+    desc: "Toggle CRT scanline mode (also via the Konami code)",
+    hidden: true,
+    run(_args, ctx) {
+      ctx.term.toggleCRT();
     },
   },
 
