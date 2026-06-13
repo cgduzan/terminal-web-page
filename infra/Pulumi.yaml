@@ -1,0 +1,3 @@
+name: cgduzan-site
+runtime: nodejs
+description: Static site hosting for cgduzan.com (S3 + CloudFront + ACM + Route53)

@@ -9,3 +9,11 @@ assets/*.webm
 assets/*.wav
 assets/*.png
 assets/*.jpg
+
+# Project-local AWS creds — NEVER commit. Scoped to this project, out of ~/.aws.
+infra/.aws/
+# Env-specific values (state-bucket URL w/ account ID, Pulumi passphrase).
+infra/.env.local
+# Pulumi build artifacts
+infra/node_modules/
+infra/bin/
