@@ -82,6 +82,7 @@ This whole site is a terminal. A few ways to explore:
   cat about.txt   read a file (you're reading one now)
   cd projects     change directory, then 'ls' again
   tree            see everything at once
+  vi notes.txt    create / edit a file (saved in your browser)
   help            full command list
 
 Not a terminal person? ${id.standardSite ? "There's a normal site at " + id.standardSite + "." : "A normal version of this site is coming soon."}`,

@@ -417,6 +417,74 @@ body.crt .window::after {
   body.crt .window::after { animation: none; }
 }
 
+/* vi/vim editor overlay (full-screen textarea + status line) */
+.editor-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 9998;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg);
+}
+
+.editor-buffer {
+  flex: 1;
+  width: 100%;
+  margin: 0;
+  border: 0;
+  padding: 8px 12px;
+  resize: none;
+  background: var(--bg);
+  color: var(--fg);
+  font-family: inherit;
+  font-size: inherit;
+  line-height: 1.4;
+  outline: none;
+  caret-color: var(--fg-bright);
+  tab-size: 4;
+}
+
+.editor-status {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 3px 12px;
+  background: var(--bg-alt);
+  color: var(--fg-bright);
+  border-top: 1px solid var(--border);
+  font-size: 0.9em;
+  min-height: 1.6em;
+}
+
+.editor-status-msg {
+  flex: 1;
+  white-space: pre;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.editor-cmd {
+  flex: 2;
+  border: 0;
+  padding: 0;
+  background: transparent;
+  color: var(--fg-bright);
+  font-family: inherit;
+  font-size: inherit;
+  outline: none;
+}
+
+.editor-hint {
+  color: var(--dim);
+  white-space: nowrap;
+}
+
+@media (max-width: 768px) {
+  .editor-hint {
+    display: none;
+  } /* no room for the keybinding hint on phones */
+}
+
 /* mobile */
 @media (max-width: 768px) {
   /* iOS Safari auto-zooms when focusing an input under 16px, so the input must

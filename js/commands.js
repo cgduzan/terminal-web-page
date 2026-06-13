@@ -29,7 +29,7 @@ TERM.commands = {
       const rows = names
         .map((n) => `  ${n.padEnd(12)}${TERM.commands[n].desc}`)
         .join("\n");
-      return `Available commands:\n\n${rows}\n\nTip: 'man <command>' for details. Tab completes. ↑/↓ for history.`;
+      return `Available commands:\n\n${rows}\n\nTip: 'man <command>' for details. Tab completes. ↑/↓ for history.\nFiles you create or edit are saved in this browser only — 'reset' clears them.`;
     },
   },
 
@@ -111,7 +111,7 @@ TERM.commands = {
       const node = path && ctx.term.node(path);
       if (!node) return `ls: cannot access '${target}': No such file or directory`;
       if (node.type !== "dir") return ctx.esc(target); // listing a file prints its name
-      const entries = Object.entries(node.children)
+      const entries = Object.entries(ctx.term.listDir(path))
         .filter(([name]) => showHidden || !name.startsWith("."))
         .sort(([a], [b]) => a.localeCompare(b));
       if (!entries.length) {
@@ -186,9 +186,10 @@ TERM.commands = {
       const node = path && ctx.term.node(path);
       if (!node) return `tree: ${args[0]}: No such file or directory`;
       const lines = [args[0] || "."];
-      const walk = (n, prefix) => {
-        if (n.type !== "dir") return;
-        const entries = Object.entries(n.children)
+      const walk = (segs, prefix) => {
+        const children = ctx.term.listDir(segs);
+        if (!children) return;
+        const entries = Object.entries(children)
           .filter(([name]) => !name.startsWith("."))
           .sort(([a], [b]) => a.localeCompare(b));
         entries.forEach(([name, child], i) => {
@@ -196,11 +197,147 @@ TERM.commands = {
           const branch = last ? "└── " : "├── ";
           const suffix = child.type === "dir" ? "/" : "";
           lines.push(prefix + branch + name + suffix);
-          walk(child, prefix + (last ? "    " : "│   "));
+          if (child.type === "dir")
+            walk(segs.concat(name), prefix + (last ? "    " : "│   "));
         });
       };
-      walk(node, "");
+      walk(path, "");
       ctx.printBlock(lines.join("\n"));
+    },
+  },
+
+  touch: {
+    desc: "Create an empty file",
+    usage: "touch <file>",
+    run(args, ctx) {
+      if (!args.length) return "touch: missing file operand";
+      const out = [];
+      for (const arg of args) {
+        const segs = ctx.term.resolve(arg);
+        const node = ctx.term.getNode(segs);
+        if (node && node.type === "dir") {
+          out.push(`touch: cannot touch '${arg}': Is a directory`);
+          continue;
+        }
+        if (!ctx.term.canWrite(segs)) {
+          out.push(`touch: cannot touch '${arg}': Permission denied`);
+          continue;
+        }
+        const parent = ctx.term.getNode(segs.slice(0, -1));
+        if (!parent || parent.type !== "dir") {
+          out.push(`touch: cannot touch '${arg}': No such file or directory`);
+          continue;
+        }
+        ctx.term.writeFile(segs, node && node.type === "file" ? node.content : "");
+      }
+      return out.join("\n");
+    },
+  },
+
+  mkdir: {
+    desc: "Create a directory",
+    usage: "mkdir <dir>",
+    run(args, ctx) {
+      if (!args.length) return "mkdir: missing operand";
+      const out = [];
+      for (const arg of args) {
+        const segs = ctx.term.resolve(arg);
+        if (ctx.term.exists(segs)) {
+          out.push(`mkdir: cannot create directory '${arg}': File exists`);
+          continue;
+        }
+        if (!ctx.term.canWrite(segs)) {
+          out.push(`mkdir: cannot create directory '${arg}': Permission denied`);
+          continue;
+        }
+        const parent = ctx.term.getNode(segs.slice(0, -1));
+        if (!parent || parent.type !== "dir") {
+          out.push(`mkdir: cannot create directory '${arg}': No such file or directory`);
+          continue;
+        }
+        ctx.term.mkdir(segs);
+      }
+      return out.join("\n");
+    },
+  },
+
+  rm: {
+    desc: "Remove files or directories",
+    usage: "rm [-r] <path>",
+    run(args, ctx) {
+      const flags = args.filter((a) => a.startsWith("-")).join("");
+      const targets = args.filter((a) => !a.startsWith("-"));
+      const recursive = flags.includes("r");
+      const force = flags.includes("f");
+      // the dramatic "rm -rf /" gag still fires for the classic roots
+      const roots = ["/", "/*", "~", "~/*", "."];
+      if (recursive && force && targets.some((t) => roots.includes(t)))
+        return ctx.term.fakeDelete();
+      if (!targets.length) return "rm: missing operand";
+      const out = [];
+      for (const arg of targets) {
+        const segs = ctx.term.resolve(arg);
+        const node = ctx.term.getNode(segs);
+        if (!node) {
+          out.push(`rm: cannot remove '${arg}': No such file or directory`);
+          continue;
+        }
+        if (!ctx.term.canWrite(segs)) {
+          out.push(`rm: cannot remove '${arg}': Permission denied`);
+          continue;
+        }
+        if (node.type === "dir" && !recursive) {
+          out.push(`rm: cannot remove '${arg}': Is a directory`);
+          continue;
+        }
+        ctx.term.remove(segs, { recursive });
+      }
+      // if we deleted the directory we were standing in, retreat home
+      if (!ctx.term.exists(ctx.term.cwd)) ctx.term.cwd = ctx.term.home.slice();
+      return out.join("\n");
+    },
+  },
+
+  vi: {
+    desc: "Edit a file (looks-like-vi)",
+    usage: "vi <file>",
+    run(args, ctx) {
+      const arg = args[0];
+      if (!arg) return "usage: vi <file>";
+      const segs = ctx.term.resolve(arg);
+      const node = ctx.term.getNode(segs);
+      if (node && node.type === "dir") return `vi: ${arg}: Is a directory`;
+      if (node && node.locked) {
+        ctx.term.denied();
+        return;
+      }
+      if (node && node.type === "link") return `vi: ${arg}: cannot edit a link`;
+      const name = segs[segs.length - 1] || arg;
+      if (!node) {
+        if (!ctx.term.canWrite(segs))
+          return `vi: cannot create '${arg}': Permission denied`;
+        const parent = ctx.term.getNode(segs.slice(0, -1));
+        if (!parent || parent.type !== "dir")
+          return `vi: cannot open '${arg}': No such file or directory`;
+      }
+      ctx.term.editor(segs, node ? node.content || "" : "", ctx.term.canWrite(segs), name);
+    },
+  },
+
+  vim: {
+    desc: "Edit a file (looks-like-vi)",
+    usage: "vim <file>",
+    run(args, ctx) {
+      return TERM.commands.vi.run(args, ctx);
+    },
+  },
+
+  reset: {
+    desc: "Reset the filesystem to its original state",
+    run(_args, ctx) {
+      ctx.term.resetFs();
+      ctx.term.cwd = ctx.term.home.slice();
+      return "Filesystem reset — your created/edited files were cleared.";
     },
   },
 
@@ -349,21 +486,6 @@ TERM.commands = {
     },
   },
 
-  rm: {
-    desc: "Remove files",
-    usage: "rm [-rf] <path>",
-    hidden: true,
-    run(args, ctx) {
-      const flags = args.filter((a) => a.startsWith("-")).join("");
-      const target = args.find((a) => !a.startsWith("-"));
-      const recursiveForce = flags.includes("r") && flags.includes("f");
-      const roots = ["/", "/*", "~", "~/*", "."];
-      if (recursiveForce && roots.includes(target)) return ctx.term.fakeDelete();
-      if (!target) return "rm: missing operand";
-      return `rm: cannot remove '${target}': Read-only file system (nice try)`;
-    },
-  },
-
   sl: {
     desc: "Steam locomotive (you meant 'ls')",
     hidden: true,
@@ -478,14 +600,6 @@ TERM.commands = {
     hidden: true,
     run(_args, ctx) {
       ctx.term.toggleCRT();
-    },
-  },
-
-  vim: {
-    desc: "Open vim",
-    hidden: true,
-    run() {
-      return "Entering vim... just kidding. You're trapped forever now.\n(try :q — it won't work. try :q! — also no. welcome home.)";
     },
   },
 

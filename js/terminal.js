@@ -38,6 +38,11 @@
       this.home = ["home", "guest"];
       this.cwd = this.home.slice();
 
+      // user's mutable-FS overlay (created/edited nodes + delete tombstones),
+      // persisted to localStorage. The seed (TERM.fs) stays read-only.
+      this.loadOverlay();
+      this._editorOpen = false;
+
       this.history = JSON.parse(localStorage.getItem("commandHistory") || "[]");
       this.historyIndex = this.history.length;
 
@@ -138,13 +143,145 @@
       return segs;
     }
 
-    node(segs) {
+    // --- mutable FS: seed + overlay -----------------------------------------
+    // The live filesystem is the read-only seed (TERM.fs) merged with a small
+    // per-browser overlay of the user's changes:
+    //   overlay.nodes:   { "<absPath>": node }   created OR edited nodes
+    //   overlay.deleted: [ "<absPath>", ... ]    tombstones for seed nodes
+    // getNode/listDir resolve against the merge; mutations write the overlay.
+
+    loadOverlay() {
+      let o = null;
+      try {
+        o = JSON.parse(localStorage.getItem("fs.overlay") || "null");
+      } catch (_) {
+        o = null;
+      }
+      this.overlay = o && typeof o === "object" ? o : {};
+      if (!this.overlay.nodes) this.overlay.nodes = {};
+      if (!Array.isArray(this.overlay.deleted)) this.overlay.deleted = [];
+    }
+
+    saveOverlay() {
+      try {
+        localStorage.setItem("fs.overlay", JSON.stringify(this.overlay));
+      } catch (e) {
+        // QuotaExceededError (~5 MB cap) — surface it to the command runner
+        throw new Error("cannot save — storage full (try 'reset')");
+      }
+    }
+
+    resetFs() {
+      this.overlay = { nodes: {}, deleted: [] };
+      try {
+        localStorage.removeItem("fs.overlay");
+      } catch (_) {
+        /* ignore */
+      }
+    }
+
+    // "/" for root, "/home/guest" for the home dir, etc.
+    pathKey(segs) {
+      return "/" + segs.join("/");
+    }
+
+    // walk the read-only seed only (ignores the overlay)
+    seedNode(segs) {
       let cur = TERM.fs;
       for (const s of segs) {
         if (!cur || cur.type !== "dir" || !cur.children[s]) return null;
         cur = cur.children[s];
       }
       return cur;
+    }
+
+    // resolve a node against seed+overlay. null if missing or tombstoned (here
+    // or at any ancestor). All single-node lookups (cat/cd/notFound) go here.
+    getNode(segs) {
+      // any tombstoned ancestor removes the whole subtree
+      for (let i = 0; i <= segs.length; i++) {
+        if (this.overlay.deleted.includes(this.pathKey(segs.slice(0, i))))
+          return null;
+      }
+      const key = this.pathKey(segs);
+      if (this.overlay.nodes[key]) return this.overlay.nodes[key];
+      return this.seedNode(segs);
+    }
+
+    // back-compat alias: commands call ctx.term.node(...)
+    node(segs) {
+      return this.getNode(segs);
+    }
+
+    // children of a directory as { name: node }, merging seed children with
+    // overlay-created children and removing tombstoned ones. null if not a dir.
+    listDir(segs) {
+      const dir = this.getNode(segs);
+      if (!dir || dir.type !== "dir") return null;
+      const out = {};
+      const seedDir = this.seedNode(segs);
+      if (seedDir && seedDir.type === "dir") {
+        for (const [name, child] of Object.entries(seedDir.children))
+          out[name] = child;
+      }
+      const dirKey = this.pathKey(segs);
+      const prefix = dirKey === "/" ? "/" : dirKey + "/";
+      const directChild = (k) => {
+        if (!k.startsWith(prefix)) return null;
+        const rest = k.slice(prefix.length);
+        return rest && !rest.includes("/") ? rest : null;
+      };
+      for (const [k, child] of Object.entries(this.overlay.nodes)) {
+        const name = directChild(k);
+        if (name) out[name] = child;
+      }
+      for (const k of this.overlay.deleted) {
+        const name = directChild(k);
+        if (name) delete out[name];
+      }
+      return out;
+    }
+
+    // writes are sandboxed under the home directory; everything outside ~ acts
+    // read-only (the "you don't have write access" illusion).
+    canWrite(segs) {
+      const homeKey = this.pathKey(this.home);
+      return this.pathKey(segs).startsWith(homeKey + "/");
+    }
+
+    exists(segs) {
+      return this.getNode(segs) != null;
+    }
+
+    writeFile(segs, content) {
+      const key = this.pathKey(segs);
+      this.overlay.nodes[key] = { type: "file", content };
+      this.overlay.deleted = this.overlay.deleted.filter((k) => k !== key);
+      this.saveOverlay();
+    }
+
+    mkdir(segs) {
+      const key = this.pathKey(segs);
+      this.overlay.nodes[key] = { type: "dir" };
+      this.overlay.deleted = this.overlay.deleted.filter((k) => k !== key);
+      this.saveOverlay();
+    }
+
+    // remove a node (and, with recursive, its whole subtree): drop any overlay
+    // entries under it, and tombstone it if it's backed by the seed.
+    remove(segs, opts = {}) {
+      const key = this.pathKey(segs);
+      const prefix = key === "/" ? "/" : key + "/";
+      // drop the node and (if recursive) every overlay descendant
+      for (const k of Object.keys(this.overlay.nodes)) {
+        if (k === key || (opts.recursive && k.startsWith(prefix)))
+          delete this.overlay.nodes[k];
+      }
+      // tombstone if the seed still provides it (ancestor check covers the
+      // subtree, so tombstoning the top node is enough)
+      if (this.seedNode(segs) && !this.overlay.deleted.includes(key))
+        this.overlay.deleted.push(key);
+      this.saveOverlay();
     }
 
     pwdString() {
@@ -238,6 +375,7 @@
 
       // keep focus on the input whenever the user clicks the screen
       document.addEventListener("click", (e) => {
+        if (this._editorOpen) return; // editor owns focus while open
         if (window.getSelection().toString()) return; // allow text selection
         this.focus();
       });
@@ -328,11 +466,11 @@
         const slash = lastToken.lastIndexOf("/");
         const dirPart = slash >= 0 ? lastToken.slice(0, slash + 1) : "";
         const prefix = slash >= 0 ? lastToken.slice(slash + 1) : lastToken;
-        const dirNode = this.node(this.resolve(dirPart || "."));
-        if (!dirNode || dirNode.type !== "dir") return;
+        const children = this.listDir(this.resolve(dirPart || "."));
+        if (!children) return;
         base = prefix;
         const showHidden = prefix.startsWith(".");
-        matches = Object.entries(dirNode.children)
+        matches = Object.entries(children)
           .filter(([n]) => (showHidden || !n.startsWith(".")) && n.startsWith(prefix))
           .map(([n, child]) => n + (child.type === "dir" ? "/" : ""))
           .sort();
@@ -556,6 +694,178 @@
       draw();
     }
 
+    // `vi`/`vim` — a full-screen, "looks-like-vi" editor (MVP). Modal in feel:
+    // NORMAL (read-only) ↔ INSERT (`i`/`a`/`o`, Esc back) and a `:` command line
+    // for :w / :q / :wq / :q! / :x (+ ! to force). Writes go through writeFile
+    // and persist to the overlay. Not a real modal engine — no motions/yank.
+    editor(segs, content, writable, name) {
+      if (this._editorOpen) return;
+      this._editorOpen = true;
+
+      const overlay = document.createElement("div");
+      overlay.className = "editor-overlay";
+
+      const buffer = document.createElement("textarea");
+      buffer.className = "editor-buffer";
+      buffer.value = content;
+      buffer.readOnly = true;
+      buffer.spellcheck = false;
+      buffer.setAttribute("autocapitalize", "off");
+      buffer.setAttribute("autocomplete", "off");
+      buffer.setAttribute("autocorrect", "off");
+
+      const status = document.createElement("div");
+      status.className = "editor-status";
+      const msg = document.createElement("span");
+      msg.className = "editor-status-msg";
+      const cmd = document.createElement("input");
+      cmd.className = "editor-cmd";
+      cmd.type = "text";
+      cmd.spellcheck = false;
+      cmd.style.display = "none";
+      const hint = document.createElement("span");
+      hint.className = "editor-hint";
+      hint.textContent = "i insert · Esc normal · :w write · :q quit";
+
+      status.appendChild(msg);
+      status.appendChild(cmd);
+      status.appendChild(hint);
+      overlay.appendChild(buffer);
+      overlay.appendChild(status);
+      document.body.appendChild(overlay);
+
+      let mode = "normal";
+      let original = content;
+      const info = () => {
+        const lines = buffer.value.length ? buffer.value.split("\n").length : 1;
+        const bytes = buffer.value.length;
+        const ro = writable ? "" : " [readonly]";
+        const dirty = buffer.value !== original ? " [+]" : "";
+        return `"${name}"${ro}${dirty} ${lines}L, ${bytes}B`;
+      };
+      const setStatus = (t) => {
+        msg.textContent = t;
+      };
+
+      const enterInsert = () => {
+        if (!writable) {
+          setStatus("W10: Warning: Changing a readonly file");
+        }
+        mode = "insert";
+        buffer.readOnly = false;
+        if (writable) setStatus("-- INSERT --");
+        buffer.focus();
+      };
+      const toNormal = (keepMsg) => {
+        mode = "normal";
+        buffer.readOnly = true;
+        cmd.style.display = "none";
+        if (!keepMsg) setStatus(info());
+        buffer.focus();
+      };
+      const enterCommand = () => {
+        mode = "command";
+        setStatus("");
+        cmd.style.display = "";
+        cmd.value = ":";
+        cmd.focus();
+        cmd.setSelectionRange(1, 1);
+      };
+
+      const close = () => {
+        if (!this._editorOpen) return;
+        this._editorOpen = false;
+        window.removeEventListener("keydown", onKey, true);
+        overlay.remove();
+        this.refreshPrompt();
+        this.focus();
+        this.scrollToBottom();
+      };
+
+      const write = () => {
+        if (!writable) {
+          setStatus("E212: Can't open file for writing (Permission denied)");
+          return false;
+        }
+        try {
+          this.writeFile(segs, buffer.value);
+        } catch (e) {
+          setStatus(e && e.message ? e.message : "E509: write failed");
+          return false;
+        }
+        original = buffer.value;
+        const lines = buffer.value.length ? buffer.value.split("\n").length : 1;
+        setStatus(`"${name}" ${lines}L, ${buffer.value.length}B written`);
+        return true;
+      };
+
+      const runEx = (raw) => {
+        let s = (raw || "").trim().replace(/^:/, "");
+        const force = s.endsWith("!");
+        if (force) s = s.slice(0, -1);
+        s = s.trim();
+        const dirty = buffer.value !== original;
+        if (s === "") {
+          toNormal(false);
+        } else if (s === "w") {
+          const ok = write();
+          toNormal(ok);
+        } else if (s === "q") {
+          if (dirty && !force) {
+            toNormal(true);
+            setStatus("E37: No write since last change (add ! to override)");
+          } else {
+            close();
+          }
+        } else if (s === "wq" || s === "x") {
+          if (write()) close();
+          else toNormal(true);
+        } else {
+          toNormal(true);
+          setStatus(`E492: Not an editor command: ${s}`);
+        }
+      };
+
+      // textarea owns NORMAL/INSERT keys; the command line owns COMMAND keys.
+      // A capture-phase window listener keeps stray keys from leaking to the
+      // terminal behind the overlay (konami/click-focus are already guarded).
+      const onKey = (e) => {
+        if (mode === "command") return; // the cmd input handles its own keys
+        if (mode === "insert") {
+          if (e.key === "Escape") {
+            e.preventDefault();
+            e.stopPropagation();
+            toNormal(false);
+          }
+          return; // let everything else type into the textarea
+        }
+        // normal mode: swallow keystrokes, act on the vi-ish ones
+        e.preventDefault();
+        e.stopPropagation();
+        if ("iaoIAO".includes(e.key)) enterInsert();
+        else if (e.key === ":") enterCommand();
+      };
+      window.addEventListener("keydown", onKey, true);
+
+      cmd.addEventListener("keydown", (e) => {
+        e.stopPropagation();
+        if (e.key === "Enter") {
+          e.preventDefault();
+          runEx(cmd.value);
+        } else if (e.key === "Escape") {
+          e.preventDefault();
+          toNormal(false);
+        }
+      });
+      // keep the leading ":" intact
+      cmd.addEventListener("input", () => {
+        if (!cmd.value.startsWith(":")) cmd.value = ":" + cmd.value;
+      });
+
+      setStatus(info());
+      buffer.focus();
+    }
+
     // `sl` — a steam locomotive chugs across the screen (the classic `ls`
     // typo gag). Pure CSS animation; respects reduced motion.
     steamLocomotive() {
@@ -661,6 +971,7 @@
       ];
       let buf = [];
       window.addEventListener("keydown", (e) => {
+        if (this._editorOpen) return; // don't capture keys while editing
         const k = e.key.length === 1 ? e.key.toLowerCase() : e.key;
         buf.push(k);
         if (buf.length > seq.length) buf = buf.slice(-seq.length);
