@@ -71,6 +71,13 @@ const cdn = new aws.cloudfront.Distribution("cdn", {
     restrictions: {
         geoRestriction: { restrictionType: "none" },
     },
+    // Unknown paths: a private OAC bucket returns 403 for a missing key (404 if
+    // ever exposed). Serve the single root object instead so a typo'd URL lands
+    // on the terminal rather than raw S3 XML. Short TTL so it isn't cached long.
+    customErrorResponses: [
+        { errorCode: 403, responseCode: 200, responsePagePath: "/index.html", errorCachingMinTtl: 10 },
+        { errorCode: 404, responseCode: 200, responsePagePath: "/index.html", errorCachingMinTtl: 10 },
+    ],
     viewerCertificate: {
         acmCertificateArn: certValidation.certificateArn,
         sslSupportMethod: "sni-only",
