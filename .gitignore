@@ -1,1 +1,11 @@
 .vscode/
+
+# Local-only easter-egg media — supply your own clips (see assets/README.md).
+# Kept out of the repo to avoid publishing copyrighted material.
+assets/*.gif
+assets/*.mp3
+assets/*.mp4
+assets/*.webm
+assets/*.wav
+assets/*.png
+assets/*.jpg

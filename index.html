@@ -4,19 +4,34 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <meta name="description" content="Description that shows up in search">
-  <title>Terminal Website</title>
+  <meta name="description" content="Chris Duzan — software engineer. A personal site that behaves like a terminal.">
+  <title>chris duzan — terminal</title>
   <!-- Hack font -->
-  <link rel='stylesheet' href='//cdn.jsdelivr.net/npm/hack-font@3.3.0/build/web/hack-subset.css'>
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/hack-font@3.3.0/build/web/hack-subset.css">
   <link rel="stylesheet" href="styles.css">
-  <script src="index.js" defer></script>
+  <script src="js/config.js" defer></script>
+  <script src="js/commands.js" defer></script>
+  <script src="js/terminal.js" defer></script>
 </head>
 
-<body>
-  <div class="outer">
-    <main id="main">
-      <div id="command-list"></div>
-    </main>
+<body data-theme="solarized-dark">
+  <div class="window">
+    <div class="titlebar">
+      <span class="dots"><i></i><i></i><i></i></span>
+      <span class="title">chsh</span>
+    </div>
+    <div id="screen">
+      <div id="output"></div>
+      <div id="input-line" class="line input-line hidden">
+        <span class="prompt"></span>
+        <span class="input-wrap">
+          <span class="input-render"></span>
+          <input id="cmd" class="input-real" type="text" autocomplete="off"
+            autocapitalize="off" autocorrect="off" spellcheck="false"
+            aria-label="Command input">
+        </span>
+      </div>
+    </div>
   </div>
 </body>
 
