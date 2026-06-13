@@ -284,6 +284,28 @@
       this.saveOverlay();
     }
 
+    // deep-copy the node at srcSegs into dstSegs via the overlay. Files/links
+    // are cloned verbatim (preserving link/locked); dirs recurse over listDir.
+    // Used by mv (copy + remove) and cp.
+    copyTree(srcSegs, dstSegs) {
+      const node = this.getNode(srcSegs);
+      if (!node) return false;
+      if (node.type === "dir") {
+        this.mkdir(dstSegs);
+        const children = this.listDir(srcSegs) || {};
+        for (const name of Object.keys(children))
+          this.copyTree(srcSegs.concat(name), dstSegs.concat(name));
+      } else {
+        const clone = {};
+        for (const k of Object.keys(node)) if (k !== "children") clone[k] = node[k];
+        const dstKey = this.pathKey(dstSegs);
+        this.overlay.nodes[dstKey] = clone;
+        this.overlay.deleted = this.overlay.deleted.filter((k) => k !== dstKey);
+        this.saveOverlay();
+      }
+      return true;
+    }
+
     pwdString() {
       return "/" + this.cwd.join("/");
     }
@@ -524,8 +546,99 @@
       this.scrollToBottom();
     }
 
+    // detect output redirection: `cmd > file` (truncate) or `cmd >> file`
+    // (append). Supports a space-delimited operator or an attached target
+    // (`>file`). The first operator wins. Returns null when there's no redirect.
+    parseRedirect(input) {
+      const tokens = input.split(/\s+/).filter(Boolean);
+      for (let i = 0; i < tokens.length; i++) {
+        const tk = tokens[i];
+        let append, target;
+        if (tk === ">" || tk === ">>") {
+          append = tk === ">>";
+          target = tokens[i + 1];
+        } else if (tk.startsWith(">>")) {
+          append = true;
+          target = tk.slice(2);
+        } else if (tk.startsWith(">")) {
+          append = false;
+          target = tk.slice(1);
+        } else {
+          continue;
+        }
+        if (!target) return { error: "syntax error near unexpected token `newline'" };
+        return { command: tokens.slice(0, i).join(" "), target, append };
+      }
+      return null;
+    }
+
+    // run a redirect: capture the command's output (return value + any
+    // print/printHTML/printBlock) and write/append it to the target file.
+    async execRedirect(redir) {
+      if (redir.error) {
+        this.printLine("bash: " + redir.error);
+        return;
+      }
+      let content = "";
+      if (redir.command) {
+        const parts = redir.command.split(/\s+/).filter(Boolean);
+        const name = parts[0];
+        const cmd = TERM.commands[name];
+        if (!cmd) {
+          this.printLine(this.notFound(name));
+          return;
+        }
+        const buf = [];
+        const push = (t) => buf.push(t == null ? "" : String(t));
+        const capCtx = {
+          print: push,
+          printBlock: push,
+          printHTML: (h) => buf.push(stripTags(h)),
+          esc: escapeHtml,
+          term: this,
+        };
+        try {
+          const ret = await cmd.run(parts.slice(1), capCtx);
+          if (ret != null && ret !== "") buf.push(String(ret));
+        } catch (err) {
+          this.printLine(`${name}: ${err && err.message ? err.message : "error"}`);
+          return;
+        }
+        content = buf.join("\n");
+      }
+
+      const segs = this.resolve(redir.target);
+      if (!this.canWrite(segs)) {
+        this.printLine(`bash: ${redir.target}: Permission denied`);
+        return;
+      }
+      const existing = this.getNode(segs);
+      if (existing && existing.type === "dir") {
+        this.printLine(`bash: ${redir.target}: Is a directory`);
+        return;
+      }
+      const parent = this.getNode(segs.slice(0, -1));
+      if (!parent || parent.type !== "dir") {
+        this.printLine(`bash: ${redir.target}: No such file or directory`);
+        return;
+      }
+      let final = content;
+      if (redir.append && existing && existing.type === "file") {
+        const prev = existing.content || "";
+        final = prev + (prev && content ? "\n" : "") + content;
+      }
+      try {
+        this.writeFile(segs, final);
+      } catch (e) {
+        this.printLine(`bash: ${e && e.message ? e.message : "write failed"}`);
+      }
+    }
+
     // run a command string without echoing the prompt (used by deep links too)
     async exec(input) {
+      const redir = this.parseRedirect(input.trim());
+      if (redir) return this.execRedirect(redir);
+
       const parts = input.trim().split(/\s+/);
       const name = parts[0];
       const args = parts.slice(1);
@@ -1095,6 +1208,17 @@
 __/ =| o |=-~~\  /~~\  /~~\  /~~\ ____Y___________|__
  |/-=|___|=    ||    ||    ||    |_____/~\___/
   \_/      \O=====O=====O=====O_/      \_/`;
+
+  // turn colorized HTML output (ls/tree) back into plain text for redirection
+  function stripTags(html) {
+    return String(html)
+      .replace(/<[^>]*>/g, "")
+      .replace(/&amp;/g, "&")
+      .replace(/&lt;/g, "<")
+      .replace(/&gt;/g, ">")
+      .replace(/&quot;/g, '"')
+      .replace(/&#39;/g, "'");
+  }
 
   function longestCommonPrefix(strs) {
     if (!strs.length) return "";

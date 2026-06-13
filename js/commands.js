@@ -298,6 +298,72 @@ TERM.commands = {
     },
   },
 
+  cp: {
+    desc: "Copy a file or directory",
+    usage: "cp [-r] <src> <dst>",
+    run(args, ctx) {
+      const t = ctx.term;
+      const flags = args.filter((a) => a.startsWith("-")).join("");
+      const recursive = flags.includes("r") || flags.includes("R");
+      const ops = args.filter((a) => !a.startsWith("-"));
+      if (ops.length < 2) return "cp: missing destination operand";
+      const [srcArg, dstArg] = ops;
+      const src = t.resolve(srcArg);
+      const srcNode = t.getNode(src);
+      if (!srcNode) return `cp: cannot stat '${srcArg}': No such file or directory`;
+      if (srcNode.type === "dir" && !recursive)
+        return `cp: -r not specified; omitting directory '${srcArg}'`;
+      let dst = t.resolve(dstArg);
+      const dstNode = t.getNode(dst);
+      if (dstNode && dstNode.type === "dir") dst = dst.concat(src[src.length - 1]);
+      if (t.pathKey(src) === t.pathKey(dst))
+        return `cp: '${srcArg}' and '${dstArg}' are the same file`;
+      if (t.pathKey(dst).startsWith(t.pathKey(src) + "/"))
+        return `cp: cannot copy '${srcArg}' into itself, '${dstArg}'`;
+      if (!t.canWrite(dst)) return `cp: cannot create '${dstArg}': Permission denied`;
+      const parent = t.getNode(dst.slice(0, -1));
+      if (!parent || parent.type !== "dir")
+        return `cp: cannot create '${dstArg}': No such file or directory`;
+      const finalDst = t.getNode(dst);
+      if (finalDst && finalDst.type === "dir" && srcNode.type !== "dir")
+        return `cp: cannot overwrite directory '${dstArg}' with non-directory`;
+      t.copyTree(src, dst);
+    },
+  },
+
+  mv: {
+    desc: "Move or rename a file or directory",
+    usage: "mv <src> <dst>",
+    run(args, ctx) {
+      const t = ctx.term;
+      const ops = args.filter((a) => !a.startsWith("-"));
+      if (ops.length < 2) return "mv: missing destination operand";
+      const [srcArg, dstArg] = ops;
+      const src = t.resolve(srcArg);
+      const srcNode = t.getNode(src);
+      if (!srcNode) return `mv: cannot stat '${srcArg}': No such file or directory`;
+      let dst = t.resolve(dstArg);
+      const dstNode = t.getNode(dst);
+      if (dstNode && dstNode.type === "dir") dst = dst.concat(src[src.length - 1]);
+      if (t.pathKey(src) === t.pathKey(dst)) return; // no-op
+      if (t.pathKey(dst).startsWith(t.pathKey(src) + "/"))
+        return `mv: cannot move '${srcArg}' to a subdirectory of itself, '${dstArg}'`;
+      if (!t.canWrite(src)) return `mv: cannot move '${srcArg}': Permission denied`;
+      if (!t.canWrite(dst)) return `mv: cannot move to '${dstArg}': Permission denied`;
+      const parent = t.getNode(dst.slice(0, -1));
+      if (!parent || parent.type !== "dir")
+        return `mv: cannot move to '${dstArg}': No such file or directory`;
+      const finalDst = t.getNode(dst);
+      if (finalDst && finalDst.type === "dir" && srcNode.type !== "dir")
+        return `mv: cannot overwrite directory '${dstArg}' with non-directory`;
+      if (finalDst && finalDst.type !== "dir" && srcNode.type === "dir")
+        return `mv: cannot overwrite non-directory '${dstArg}' with directory`;
+      t.copyTree(src, dst);
+      t.remove(src, { recursive: true });
+      if (!t.exists(t.cwd)) t.cwd = t.home.slice();
+    },
+  },
+
   vi: {
     desc: "Edit a file (looks-like-vi)",
     usage: "vi <file>",
