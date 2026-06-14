@@ -40,16 +40,23 @@ Almost everything you'll want to change is in **`js/config.js`**:
 - `TERM.themes` — add a theme name here, then add a matching
   `[data-theme="name"]` block of CSS variables in `styles.css`.
 
-To add a command, add an entry to `TERM.commands` in `js/commands.js`. `help`
-and `man` pick it up automatically.
+To add a command, add an entry to `TERM.commands` in `js/commands.js`. It shows
+up in `help`, `man`, and Tab autocomplete automatically. Two opt-out flags:
+`hidden: true` keeps it out of `help` and autocomplete (easter eggs), and
+`native: true` keeps it out of `help` only — standard shell builtins (`ls`,
+`cd`, `vi`, …) still run and autocomplete, but `help` stays focused on the
+about-me commands.
 
 ## Features
 
 - Full boot animation on first visit; quiet "last login" on return visits.
 - Fake filesystem with `ls -a`, `cd`, `cat`, `tree`, relative/`~`/absolute paths.
+- Mutable filesystem: `touch`, `mkdir`, `rm`, `cp`, `mv`, output redirection
+  (`>` / `>>`), and a real `vi`/`vim` editor. Edits persist per-browser
+  (localStorage overlay); `reset` restores the original tree.
 - Command history (persisted), ↑/↓ recall, Tab autocomplete, Ctrl+C / Ctrl+L.
 - Custom block cursor.
 - Theme switcher (`theme`), persisted to localStorage.
 - Deep links: `?cmd=neofetch` runs a command on load (and skips the intro).
-- Easter eggs: `sudo`, `vim`, a locked `.secret`, and `matrix`.
+- Easter eggs: `sudo`, `sl`, `cowsay`, a locked `.secret`, and `matrix`.
 - Respects `prefers-reduced-motion`.
