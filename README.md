@@ -31,8 +31,8 @@ js/terminal.js    engine: boot, input, cursor, history, fs nav, autocomplete
 
 Almost everything you'll want to change is in **`js/config.js`**:
 
-- `TERM.identity` — name, email, GitHub, **LinkedIn (currently `REPLACE-ME`)**,
-  resume URL, repo URL, and an optional `standardSite` link.
+- `TERM.identity` — name, email, GitHub, LinkedIn, resume URL, repo URL, and
+  an optional `standardSite` link.
 - `TERM.fs` — the fake filesystem. Content files (`about.txt`, `skills.txt`,
   `now.txt`, `contact.txt`, `experience/*`, `projects/*`) hold the prose
   visitors read with `cat`. Anything in `[brackets]` is a placeholder to fill.

@@ -19,10 +19,9 @@ TERM.identity = {
   host: "",
   name: "Chris Duzan",
   // Action commands open these. Edit freely.
-  email: "chris@eluve.com",
-  personalEmail: "cgduzan@gmail.com",
+  email: "cgduzan@gmail.com",
   github: "https://github.com/cgduzan",
-  linkedin: "https://www.linkedin.com/in/REPLACE-ME", // TODO: your LinkedIn
+  linkedin: "https://www.linkedin.com/in/christopher-duzan/",
   resumeUrl: "https://standardresume.co/r/QJ_hCYRLyUAn3zHJmXCYV",
   repoUrl: "https://github.com/cgduzan/terminal-web-page",
   // Optional: link to a plain (non-terminal) version of the site.
