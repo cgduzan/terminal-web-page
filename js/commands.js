@@ -5,6 +5,9 @@
  *   - desc    one-line description (shown in `help` and `man`)
  *   - usage   optional usage string (shown in `man`)
  *   - hidden  excluded from `help`/autocomplete (easter eggs)
+ *   - native  standard shell builtin (ls, cd, cat, vi, …) — excluded from
+ *             `help` but still runs/autocompletes. Keeps `help` focused on the
+ *             site's purpose: the about-me commands.
  *   - run     (args: string[], ctx) => string | void | Promise<...>
  *             Return a string to print it. Or use ctx.print / ctx.printHTML
  *             for richer/async output and return nothing.
@@ -21,20 +24,22 @@
 TERM.commands = {
   help: {
     desc: "List available commands",
+    native: true,
     run() {
       const names = Object.entries(TERM.commands)
-        .filter(([, c]) => !c.hidden)
+        .filter(([, c]) => !c.hidden && !c.native)
         .map(([name]) => name)
         .sort();
       const rows = names
         .map((n) => `  ${n.padEnd(12)}${TERM.commands[n].desc}`)
         .join("\n");
-      return `Available commands:\n\n${rows}\n\nTip: 'man <command>' for details. Tab completes. ↑/↓ for history.\nFiles you create or edit are saved in this browser only — 'reset' clears them.`;
+      return `What you can do here:\n\n${rows}\n\nStandard shell commands (ls, cd, cat, vi, …) work too — try them, or Tab to autocomplete.\nTip: 'man <command>' for details. ↑/↓ for history.\nFiles you create or edit are saved in this browser only — 'reset' clears them.`;
     },
   },
 
   man: {
     desc: "Show the manual for a command",
+    native: true,
     usage: "man <command>",
     run(args) {
       const name = args[0];
@@ -49,6 +54,7 @@ TERM.commands = {
 
   clear: {
     desc: "Clear the screen",
+    native: true,
     run(_args, ctx) {
       ctx.term.clearScreen();
     },
@@ -56,6 +62,7 @@ TERM.commands = {
 
   echo: {
     desc: "Print text back",
+    native: true,
     usage: "echo <text>",
     run(args) {
       return args.join(" ");
@@ -64,6 +71,7 @@ TERM.commands = {
 
   date: {
     desc: "Show the current date and time",
+    native: true,
     run() {
       return new Date().toString();
     },
@@ -71,6 +79,7 @@ TERM.commands = {
 
   whoami: {
     desc: "Print the current user",
+    native: true,
     run() {
       return TERM.identity.user;
     },
@@ -78,6 +87,7 @@ TERM.commands = {
 
   hostname: {
     desc: "Print the hostname",
+    native: true,
     run(_args, ctx) {
       return ctx.term.host;
     },
@@ -85,6 +95,7 @@ TERM.commands = {
 
   history: {
     desc: "Show command history",
+    native: true,
     run(_args, ctx) {
       const h = ctx.term.history;
       if (!h.length) return "No history yet.";
@@ -96,6 +107,7 @@ TERM.commands = {
 
   pwd: {
     desc: "Print the working directory",
+    native: true,
     run(_args, ctx) {
       return ctx.term.pwdString();
     },
@@ -103,6 +115,7 @@ TERM.commands = {
 
   ls: {
     desc: "List directory contents",
+    native: true,
     usage: "ls [-a] [path]",
     run(args, ctx) {
       const showHidden = args.includes("-a");
@@ -135,6 +148,7 @@ TERM.commands = {
 
   cd: {
     desc: "Change directory",
+    native: true,
     usage: "cd [path]",
     run(args, ctx) {
       const target = args[0] || "~";
@@ -148,6 +162,7 @@ TERM.commands = {
 
   cat: {
     desc: "Print a file's contents",
+    native: true,
     usage: "cat <file>",
     run(args, ctx) {
       if (!args.length) return "cat: missing file operand. Try 'cat about.txt'.";
@@ -180,6 +195,7 @@ TERM.commands = {
 
   tree: {
     desc: "Show the directory tree",
+    native: true,
     usage: "tree [path]",
     run(args, ctx) {
       const path = ctx.term.resolve(args[0] || ".");
@@ -208,6 +224,7 @@ TERM.commands = {
 
   touch: {
     desc: "Create an empty file",
+    native: true,
     usage: "touch <file>",
     run(args, ctx) {
       if (!args.length) return "touch: missing file operand";
@@ -236,6 +253,7 @@ TERM.commands = {
 
   mkdir: {
     desc: "Create a directory",
+    native: true,
     usage: "mkdir <dir>",
     run(args, ctx) {
       if (!args.length) return "mkdir: missing operand";
@@ -263,6 +281,7 @@ TERM.commands = {
 
   rm: {
     desc: "Remove files or directories",
+    native: true,
     usage: "rm [-r] <path>",
     run(args, ctx) {
       const flags = args.filter((a) => a.startsWith("-")).join("");
@@ -300,6 +319,7 @@ TERM.commands = {
 
   cp: {
     desc: "Copy a file or directory",
+    native: true,
     usage: "cp [-r] <src> <dst>",
     run(args, ctx) {
       const t = ctx.term;
@@ -333,6 +353,7 @@ TERM.commands = {
 
   mv: {
     desc: "Move or rename a file or directory",
+    native: true,
     usage: "mv <src> <dst>",
     run(args, ctx) {
       const t = ctx.term;
@@ -366,6 +387,7 @@ TERM.commands = {
 
   vi: {
     desc: "Edit a file (looks-like-vi)",
+    native: true,
     usage: "vi <file>",
     run(args, ctx) {
       const arg = args[0];
@@ -392,6 +414,7 @@ TERM.commands = {
 
   vim: {
     desc: "Edit a file (looks-like-vi)",
+    native: true,
     usage: "vim <file>",
     run(args, ctx) {
       return TERM.commands.vi.run(args, ctx);
@@ -400,6 +423,7 @@ TERM.commands = {
 
   reset: {
     desc: "Reset the filesystem to its original state",
+    native: true,
     run(_args, ctx) {
       ctx.term.resetFs();
       ctx.term.cwd = ctx.term.home.slice();
