@@ -1527,8 +1527,8 @@
 
         const draw = (now) => {
           const t = Math.min(1, (now - t0) / DURATION);
-          // ease-in cubic: readable page, then hard collapse
-          const pull = t * t * t;
+          // ease-in quadratic: fold reads earlier, still accelerates into the gulp
+          const pull = t * t;
 
           ctx.fillStyle = "#000";
           ctx.fillRect(0, 0, w, h);
@@ -1557,8 +1557,8 @@
                 const norm = Math.min(1, dist / maxR);
 
                 // center falls in first; edges trail behind (fabric → drain)
-                const local = Math.min(1, pull * (1.55 - norm * 0.7));
-                const p = local * local;
+                const local = Math.min(1, pull * (1.85 - norm * 0.65));
+                const p = Math.pow(local, 1.55);
                 if (p >= 0.992) continue;
 
                 const nx = ox + dx * p;
