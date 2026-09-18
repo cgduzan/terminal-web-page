@@ -541,6 +541,82 @@ body {
   to { transform: scale(1); opacity: 1; }
 }
 
+/* rm -rf / — black-hole implosion */
+.blackhole-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 10000;
+  pointer-events: none;
+  background: transparent;
+}
+
+.blackhole-canvas {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+
+body.blackhole-active {
+  overflow: hidden;
+}
+
+body.blackhole-active .window {
+  position: relative;
+  z-index: 9990;
+}
+
+.window.imploding {
+  transform-origin: center center;
+  /* ease-in hard: sits still briefly, then collapses fast */
+  animation: blackhole-suck 2.6s cubic-bezier(0.7, 0.0, 0.85, 0.15) forwards;
+  will-change: transform, filter, opacity;
+}
+
+/* keep the terminal invisible during the post-collapse blackout hold */
+.window.blackhole-hidden {
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+}
+
+@keyframes blackhole-suck {
+  0% {
+    transform: scale(1) rotate(0deg);
+    filter: brightness(1) contrast(1);
+    opacity: 1;
+    border-radius: 8px;
+  }
+  18% {
+    transform: scale(0.97) rotate(-4deg);
+    filter: brightness(1.2) contrast(1.15) saturate(1.4);
+    opacity: 1;
+  }
+  40% {
+    transform: scale(0.62) rotate(35deg) skewX(3deg);
+    filter: brightness(0.95) contrast(1.4) saturate(1.6);
+    opacity: 0.98;
+    border-radius: 24%;
+  }
+  65% {
+    transform: scale(0.22) rotate(220deg) skewX(10deg);
+    filter: brightness(0.55) contrast(1.8) blur(1.5px);
+    opacity: 0.85;
+    border-radius: 45%;
+  }
+  85% {
+    transform: scale(0.06) rotate(480deg) skewX(16deg);
+    filter: brightness(0.2) contrast(2.2) blur(5px);
+    opacity: 0.55;
+    border-radius: 50%;
+  }
+  100% {
+    transform: scale(0) rotate(720deg);
+    filter: brightness(0) blur(14px);
+    opacity: 0;
+    border-radius: 50%;
+  }
+}
+
 /* Konami code — CRT scanline effect */
 body.crt #screen {
   text-shadow: 0 0 3px var(--fg-bright);
@@ -571,6 +647,7 @@ body.crt .window::after {
   .shake { animation: none; }
   .sl-train { animation-duration: 0s; }
   .hack-granted.show { animation: none; }
+  .window.imploding { animation: none; }
   body.crt .window::after { animation: none; }
 }
 

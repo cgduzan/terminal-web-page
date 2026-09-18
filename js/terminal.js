@@ -1322,35 +1322,201 @@
       });
     }
 
-    // `rm -rf /` gag — fake "deleting everything" progress, then "just
-    // kidding". Returns a promise the command awaits.
+    // `rm -rf /` gag — suck the whole terminal into a black hole, then
+    // "just kidding". Returns a promise the command awaits.
     async fakeDelete() {
-      const targets = [
-        "/bin",
-        "/boot",
-        "/etc",
-        "/home/guest",
-        "/lib",
-        "/usr",
-        "/var",
-        "the last 10 years of your photos",
-        "your will to live",
-      ];
       this.printLine("rm: descending into / — this cannot be undone.");
-      const line = document.createElement("div");
-      line.className = "line";
-      this.output.appendChild(line);
-      for (const t of targets) {
-        line.textContent = `removing ${t} ...`;
-        this.scrollToBottom();
-        await this.delay(reducedMotion ? 0 : 900);
+      this.scrollToBottom();
+
+      if (reducedMotion) {
+        await this.delay(200);
+        this.printLine("");
+        this.printLine(
+          "just kidding 😅  it's a fake filesystem — nothing was harmed."
+        );
+        return;
       }
-      line.textContent = "removing / ... 100%";
-      await this.delay(reducedMotion ? 0 : 1200);
+
+      await this.blackholeImplode();
       this.printLine("");
       this.printLine(
         "just kidding 😅  it's a fake filesystem — nothing was harmed."
       );
+    }
+
+    // Fullscreen black-hole implosion: accretion-disk canvas over the
+    // window while CSS spins `.window` into the singularity. Auto-runs;
+    // no dismiss-early (it'd spoil the gag).
+    blackholeImplode() {
+      return new Promise((resolve) => {
+        if (document.querySelector(".blackhole-overlay")) {
+          resolve();
+          return;
+        }
+
+        const win = document.querySelector(".window");
+        const overlay = document.createElement("div");
+        overlay.className = "blackhole-overlay";
+        const canvas = document.createElement("canvas");
+        canvas.className = "blackhole-canvas";
+        overlay.appendChild(canvas);
+        document.body.appendChild(overlay);
+
+        const ctx = canvas.getContext("2d");
+        let w = 0;
+        let h = 0;
+        let cx = 0;
+        let cy = 0;
+        const resize = () => {
+          w = canvas.width = window.innerWidth;
+          h = canvas.height = window.innerHeight;
+          cx = w / 2;
+          cy = h / 2;
+        };
+        resize();
+        window.addEventListener("resize", resize);
+
+        // debris particles spiraling into the event horizon
+        const N = Math.min(280, Math.floor((w * h) / 4500));
+        const parts = Array.from({ length: N }, () => ({
+          angle: Math.random() * Math.PI * 2,
+          radius: 60 + Math.random() * Math.max(w, h) * 0.78,
+          speed: 1.1 + Math.random() * 2.8,
+          size: 0.7 + Math.random() * 2.6,
+          hue: 18 + Math.random() * 42, // warm accretion glow
+          alpha: 0.4 + Math.random() * 0.6,
+        }));
+
+        const DURATION = 2600;
+        const t0 = performance.now();
+        let raf = 0;
+
+        win.classList.add("imploding");
+        document.body.classList.add("blackhole-active");
+        beep();
+
+        const draw = (now) => {
+          const t = Math.min(1, (now - t0) / DURATION);
+          // ease-in: slow drip, then violent collapse
+          const ease = t * t;
+          const pull = 0.55 + ease * 10;
+
+          ctx.clearRect(0, 0, w, h);
+
+          // hole stays small until the terminal has visibly shrunk, then gulps
+          const holeR = 4 + Math.pow(ease, 1.4) * Math.min(w, h) * 0.42;
+
+          // soft edge darkening only — keep the center clear so `.window` shows
+          const vignette = ctx.createRadialGradient(
+            cx,
+            cy,
+            Math.min(w, h) * 0.25,
+            cx,
+            cy,
+            Math.max(w, h) * 0.7
+          );
+          vignette.addColorStop(0, "rgba(0,0,0,0)");
+          vignette.addColorStop(0.55, `rgba(0,0,0,${ease * 0.2})`);
+          vignette.addColorStop(1, `rgba(0,0,0,${0.15 + ease * 0.7})`);
+          ctx.fillStyle = vignette;
+          ctx.fillRect(0, 0, w, h);
+
+          // accretion disk rings (drawn ABOVE the window)
+          const ringAlpha = 0.2 + ease * 0.85;
+          for (let i = 0; i < 6; i++) {
+            const r = holeR * (1.35 + i * 0.32) + 28 * (1 - ease * 0.5);
+            ctx.beginPath();
+            ctx.ellipse(cx, cy, r * 1.7, r * 0.36, -0.4, 0, Math.PI * 2);
+            ctx.strokeStyle = `hsla(${22 + i * 10}, 98%, ${58 - i * 5}%, ${
+              (0.65 - i * 0.08) * ringAlpha
+            })`;
+            ctx.lineWidth = 1.5 + (5 - i) * 0.7;
+            ctx.shadowColor = `hsla(${30 + i * 6}, 100%, 55%, ${0.5 * ringAlpha})`;
+            ctx.shadowBlur = 10;
+            ctx.stroke();
+          }
+          ctx.shadowBlur = 0;
+
+          // event horizon core
+          if (holeR > 3) {
+            const core = ctx.createRadialGradient(cx, cy, 0, cx, cy, holeR);
+            core.addColorStop(0, "#000");
+            core.addColorStop(0.7, "#000");
+            core.addColorStop(1, `rgba(255,140,40,${0.35 + ease * 0.5})`);
+            ctx.beginPath();
+            ctx.arc(cx, cy, holeR, 0, Math.PI * 2);
+            ctx.fillStyle = core;
+            ctx.fill();
+          }
+
+          // photon-ring flash near the end
+          if (t > 0.72) {
+            const flash = (t - 0.72) / 0.28;
+            ctx.beginPath();
+            ctx.arc(cx, cy, holeR * (1.05 + flash * 0.55), 0, Math.PI * 2);
+            ctx.strokeStyle = `rgba(255,230,180,${(1 - flash) * 0.95})`;
+            ctx.lineWidth = 2 + flash * 14;
+            ctx.stroke();
+          }
+
+          // reveal particles gradually so the terminal stays readable early
+          const reveal = 0.12 + ease * 0.88;
+          const nDraw = Math.floor(parts.length * reveal);
+          for (let i = 0; i < nDraw; i++) {
+            const p = parts[i];
+            p.angle += (p.speed * 0.016) / Math.max(0.08, p.radius / 180);
+            p.radius = Math.max(2, p.radius - pull * (0.45 + p.speed * 0.4));
+            const x = cx + Math.cos(p.angle) * p.radius * 1.65;
+            const y = cy + Math.sin(p.angle) * p.radius * 0.4;
+            const fade = Math.min(1, p.radius / 90) * (0.35 + ease * 0.65);
+            const tx = cx + Math.cos(p.angle - 0.12) * p.radius * 1.65;
+            const ty = cy + Math.sin(p.angle - 0.12) * p.radius * 0.4;
+            ctx.beginPath();
+            ctx.moveTo(tx, ty);
+            ctx.lineTo(x, y);
+            ctx.strokeStyle = `hsla(${p.hue}, 95%, 62%, ${p.alpha * fade * 0.7})`;
+            ctx.lineWidth = p.size;
+            ctx.stroke();
+            ctx.beginPath();
+            ctx.arc(x, y, p.size * 0.55, 0, Math.PI * 2);
+            ctx.fillStyle = `hsla(${p.hue}, 100%, 70%, ${p.alpha * fade})`;
+            ctx.fill();
+          }
+
+          // final whiteout → total black as everything crosses the horizon
+          if (t > 0.86) {
+            const k = (t - 0.86) / 0.14;
+            ctx.fillStyle = `rgba(255,240,200,${(1 - k) * 0.5})`;
+            ctx.fillRect(0, 0, w, h);
+            ctx.fillStyle = `rgba(0,0,0,${k})`;
+            ctx.fillRect(0, 0, w, h);
+          }
+
+          if (t < 1) {
+            raf = requestAnimationFrame(draw);
+          } else {
+            // hold on pure black so the snap-back doesn't feel instant
+            ctx.fillStyle = "#000";
+            ctx.fillRect(0, 0, w, h);
+            win.classList.add("blackhole-hidden");
+            setTimeout(cleanup, 2800);
+          }
+        };
+
+        const cleanup = () => {
+          cancelAnimationFrame(raf);
+          window.removeEventListener("resize", resize);
+          overlay.remove();
+          win.classList.remove("imploding", "blackhole-hidden");
+          document.body.classList.remove("blackhole-active");
+          // force layout so the next paint isn't stuck at scale(0)
+          void win.offsetWidth;
+          beep();
+          resolve();
+        };
+
+        raf = requestAnimationFrame(draw);
+      });
     }
 
     // Konami code (↑↑↓↓←→←→ B A) toggles a CRT scanline effect.
