@@ -37,12 +37,18 @@
 
       this.home = ["home", "guest"];
       this.cwd = this.home.slice();
+      this.oldpwd = null; // previous cwd (for `cd -`)
+      this.dirstack = []; // pushd/popd stack of path segment arrays
 
       // user's mutable-FS overlay (created/edited nodes + delete tombstones),
       // persisted to localStorage. The seed (TERM.fs) stays read-only.
       this.loadOverlay();
       this._editorOpen = false;
       this._fsnOpen = false;
+      this._pagerOpen = false;
+
+      // session aliases on top of TERM.aliases (from `alias name=value`)
+      this.sessionAliases = {};
 
       this.history = JSON.parse(localStorage.getItem("commandHistory") || "[]");
       this.historyIndex = this.history.length;
@@ -250,22 +256,113 @@
       return this.pathKey(segs).startsWith(homeKey + "/");
     }
 
+    // synthesize the same mode string `ls -l` shows (honors node.mode / locked)
+    effectiveMode(node) {
+      if (!node) return null;
+      if (
+        node.mode &&
+        /^[-dl][r-][w-][x-][r-][w-][x-][r-][w-][x-]$/.test(node.mode)
+      )
+        return node.mode;
+      if (node.locked) return "-r--------";
+      if (node.type === "dir") return "drwxr-xr-x";
+      if (node.type === "link") return "lrwxrwxrwx";
+      return "-rw-r--r--";
+    }
+
+    // owner r/w/x from the mode string (we only ever act as the file owner)
+    ownerCan(node, bit) {
+      const mode = this.effectiveMode(node);
+      if (!mode) return false;
+      const idx = { r: 1, w: 2, x: 3 }[bit];
+      if (idx == null) return false;
+      return mode[idx] === bit;
+    }
+
+    canRead(segs) {
+      const node = this.getNode(segs);
+      if (!node) return false;
+      if (node.locked) return false;
+      return this.ownerCan(node, "r");
+    }
+
+    // content edits / create-or-replace a file node (honors chmod, not just ~)
+    canModify(segs) {
+      if (!this.canWrite(segs)) return false;
+      const node = this.getNode(segs);
+      if (!node) {
+        const parent = this.getNode(segs.slice(0, -1));
+        return !!(parent && parent.type === "dir" && this.ownerCan(parent, "w"));
+      }
+      if (node.locked) return false;
+      return this.ownerCan(node, "w");
+    }
+
+    // create/remove entries inside a directory (mkdir, rm, touch new file)
+    canWriteDir(dirSegs) {
+      const homeKey = this.pathKey(this.home);
+      const dirKey = this.pathKey(dirSegs);
+      if (dirKey !== homeKey && !dirKey.startsWith(homeKey + "/")) return false;
+      const node = this.getNode(dirSegs);
+      if (!node || node.type !== "dir") return false;
+      return this.ownerCan(node, "w");
+    }
+
     exists(segs) {
       return this.getNode(segs) != null;
     }
 
-    writeFile(segs, content) {
+    nowMtime() {
+      return Date.now();
+    }
+
+    // clone a live node into the overlay (sans children) so metadata can stick
+    overlayClone(segs, patch = {}) {
+      const cur = this.getNode(segs);
       const key = this.pathKey(segs);
-      this.overlay.nodes[key] = { type: "file", content };
+      const base = {};
+      if (cur) {
+        for (const k of Object.keys(cur))
+          if (k !== "children") base[k] = cur[k];
+      }
+      Object.assign(base, patch);
+      if (!base.type) base.type = "file";
+      if (base.mtime == null) base.mtime = this.nowMtime();
+      this.overlay.nodes[key] = base;
       this.overlay.deleted = this.overlay.deleted.filter((k) => k !== key);
       this.saveOverlay();
+      return base;
+    }
+
+    writeFile(segs, content) {
+      const cur = this.getNode(segs);
+      const patch = { type: "file", content, mtime: this.nowMtime() };
+      if (cur && cur.mode) patch.mode = cur.mode;
+      if (cur && cur.locked) patch.locked = true;
+      this.overlayClone(segs, patch);
     }
 
     mkdir(segs) {
-      const key = this.pathKey(segs);
-      this.overlay.nodes[key] = { type: "dir" };
-      this.overlay.deleted = this.overlay.deleted.filter((k) => k !== key);
-      this.saveOverlay();
+      const cur = this.getNode(segs);
+      const patch = { type: "dir", mtime: this.nowMtime() };
+      if (cur && cur.mode) patch.mode = cur.mode;
+      this.overlayClone(segs, patch);
+    }
+
+    // update mode/mtime/etc. on an existing node via the overlay
+    patchNode(segs, patch) {
+      const cur = this.getNode(segs);
+      if (!cur) return false;
+      const next = Object.assign({}, patch, { mtime: this.nowMtime() });
+      if (cur.type === "file" || cur.type === "link") {
+        if (next.content == null) next.content = cur.content;
+        if (cur.url && next.url == null) next.url = cur.url;
+        if (cur.locked && next.locked == null) next.locked = cur.locked;
+      }
+      next.type = cur.type;
+      if (cur.mode && next.mode == null) next.mode = cur.mode;
+      this.overlayClone(segs, next);
+      return true;
     }
 
     // remove a node (and, with recursive, its whole subtree): drop any overlay
@@ -299,12 +396,19 @@
       } else {
         const clone = {};
         for (const k of Object.keys(node)) if (k !== "children") clone[k] = node[k];
+        clone.mtime = this.nowMtime();
         const dstKey = this.pathKey(dstSegs);
         this.overlay.nodes[dstKey] = clone;
         this.overlay.deleted = this.overlay.deleted.filter((k) => k !== dstKey);
         this.saveOverlay();
       }
       return true;
+    }
+
+    // change cwd, remembering the previous directory for `cd -`
+    setCwd(segs) {
+      this.oldpwd = this.cwd.slice();
+      this.cwd = segs.slice();
     }
 
     pwdString() {
@@ -398,7 +502,7 @@
 
       // keep focus on the input whenever the user clicks the screen
       document.addEventListener("click", (e) => {
-        if (this._editorOpen || this._fsnOpen) return; // overlays own focus
+        if (this._editorOpen || this._fsnOpen || this._pagerOpen) return;
         if (window.getSelection().toString()) return; // allow text selection
         this.focus();
       });
@@ -473,17 +577,44 @@
 
     autocomplete() {
       const v = this.input.value;
-      const tokens = v.split(/(\s+)/); // keep separators
-      const lastToken = tokens[tokens.length - 1];
-      const completingCommand = !/\s/.test(v.trimEnd()) && tokens.length <= 1;
+      const leading = v.match(/^\s*/)?.[0] || "";
+      let tokens;
+      try {
+        tokens = tokenize(v.trimStart());
+      } catch (_) {
+        return;
+      }
+      // incomplete trailing token: re-tokenize raw end
+      const endsWithSpace = /\s$/.test(v);
+      const lastToken = endsWithSpace ? "" : tokens[tokens.length - 1] || "";
+      const completingCommand =
+        tokens.length === 0 || (tokens.length === 1 && !endsWithSpace);
 
       let matches, base, replace;
       if (completingCommand) {
-        base = v;
+        base = lastToken;
         matches = Object.keys(TERM.commands)
           .filter((c) => !TERM.commands[c].hidden && c.startsWith(base))
           .sort();
-        replace = (name) => name + " ";
+        // also suggest aliases
+        const aliasNames = Object.keys(this.allAliases()).filter(
+          (a) => a.startsWith(base) && !matches.includes(a)
+        );
+        matches = matches.concat(aliasNames).sort();
+        replace = (name) => leading + name + " ";
+      } else if (lastToken.startsWith("-") && !lastToken.includes("/")) {
+        // flag completion for the command (first token)
+        const cmdName = tokens[0];
+        const cmd = TERM.commands[cmdName];
+        const flags = (cmd && cmd.flags) || [];
+        base = lastToken;
+        matches = flags.filter((f) => f.startsWith(base)).sort();
+        replace = (name) => {
+          const head = endsWithSpace
+            ? v
+            : v.slice(0, v.length - lastToken.length);
+          return head + name + " ";
+        };
       } else {
         // completing a path argument
         const slash = lastToken.lastIndexOf("/");
@@ -494,11 +625,16 @@
         base = prefix;
         const showHidden = prefix.startsWith(".");
         matches = Object.entries(children)
-          .filter(([n]) => (showHidden || !n.startsWith(".")) && n.startsWith(prefix))
+          .filter(
+            ([n]) =>
+              (showHidden || !n.startsWith(".")) && n.startsWith(prefix)
+          )
           .map(([n, child]) => n + (child.type === "dir" ? "/" : ""))
           .sort();
         replace = (name) => {
-          const head = v.slice(0, v.length - lastToken.length);
+          const head = endsWithSpace
+            ? v
+            : v.slice(0, v.length - lastToken.length);
           const suffix = name.endsWith("/") ? "" : " ";
           return head + dirPart + name + suffix;
         };
@@ -510,13 +646,21 @@
         this.moveCursorToEnd();
         return;
       }
-      // multiple: extend to longest common prefix, then list
-      const lcp = longestCommonPrefix(matches.map((m) => m.replace(/\/$/, "")));
+      const lcp = longestCommonPrefix(
+        matches.map((m) => m.replace(/\/$/, ""))
+      );
       if (lcp.length > base.length) {
         if (completingCommand) {
-          this.input.value = lcp;
+          this.input.value = leading + lcp;
+        } else if (lastToken.startsWith("-") && !lastToken.includes("/")) {
+          const head = endsWithSpace
+            ? v
+            : v.slice(0, v.length - lastToken.length);
+          this.input.value = head + lcp;
         } else {
-          const head = v.slice(0, v.length - lastToken.length);
+          const head = endsWithSpace
+            ? v
+            : v.slice(0, v.length - lastToken.length);
           const slash = lastToken.lastIndexOf("/");
           const dirPart = slash >= 0 ? lastToken.slice(0, slash + 1) : "";
           this.input.value = head + dirPart + lcp;
@@ -526,6 +670,30 @@
         this.echoCommand(v);
         this.printLine(matches.join("   "));
       }
+    }
+
+    allAliases() {
+      return Object.assign({}, TERM.aliases || {}, this.sessionAliases);
+    }
+
+    expandAliases(tokens) {
+      const aliases = this.allAliases();
+      let out = tokens.slice();
+      for (let depth = 0; depth < 8; depth++) {
+        const name = out[0];
+        if (!name || !aliases[name]) break;
+        let exp;
+        try {
+          exp = tokenize(aliases[name]);
+        } catch (_) {
+          break;
+        }
+        if (!exp.length) break;
+        // prevent immediate self-loop
+        if (exp[0] === name && exp.length === 1) break;
+        out = exp.concat(out.slice(1));
+      }
+      return out;
     }
 
     // --- running commands --------------------------------------------------
@@ -547,86 +715,27 @@
       this.scrollToBottom();
     }
 
-    // detect output redirection: `cmd > file` (truncate) or `cmd >> file`
-    // (append). Supports a space-delimited operator or an attached target
-    // (`>file`). The first operator wins. Returns null when there's no redirect.
-    parseRedirect(input) {
-      const tokens = input.split(/\s+/).filter(Boolean);
-      for (let i = 0; i < tokens.length; i++) {
-        const tk = tokens[i];
-        let append, target;
-        if (tk === ">" || tk === ">>") {
-          append = tk === ">>";
-          target = tokens[i + 1];
-        } else if (tk.startsWith(">>")) {
-          append = true;
-          target = tk.slice(2);
-        } else if (tk.startsWith(">")) {
-          append = false;
-          target = tk.slice(1);
-        } else {
-          continue;
-        }
-        if (!target) return { error: "syntax error near unexpected token `newline'" };
-        return { command: tokens.slice(0, i).join(" "), target, append };
-      }
-      return null;
-    }
-
-    // run a redirect: capture the command's output (return value + any
-    // print/printHTML/printBlock) and write/append it to the target file.
-    async execRedirect(redir) {
-      if (redir.error) {
-        this.printLine("bash: " + redir.error);
-        return;
-      }
-      let content = "";
-      if (redir.command) {
-        const parts = redir.command.split(/\s+/).filter(Boolean);
-        const name = parts[0];
-        const cmd = TERM.commands[name];
-        if (!cmd) {
-          this.printLine(this.notFound(name));
-          return;
-        }
-        const buf = [];
-        const push = (t) => buf.push(t == null ? "" : String(t));
-        const capCtx = {
-          print: push,
-          printBlock: push,
-          printHTML: (h) => buf.push(stripTags(h)),
-          esc: escapeHtml,
-          term: this,
-        };
-        try {
-          const ret = await cmd.run(parts.slice(1), capCtx);
-          if (ret != null && ret !== "") buf.push(String(ret));
-        } catch (err) {
-          this.printLine(`${name}: ${err && err.message ? err.message : "error"}`);
-          return;
-        }
-        content = buf.join("\n");
-      }
-
-      const segs = this.resolve(redir.target);
-      if (!this.canWrite(segs)) {
-        this.printLine(`bash: ${redir.target}: Permission denied`);
+    // write captured output to a redirect target
+    writeRedirectTarget(target, content, append) {
+      const segs = this.resolve(target);
+      if (!this.canModify(segs)) {
+        this.printLine(`bash: ${target}: Permission denied`);
         return;
       }
       const existing = this.getNode(segs);
       if (existing && existing.type === "dir") {
-        this.printLine(`bash: ${redir.target}: Is a directory`);
+        this.printLine(`bash: ${target}: Is a directory`);
         return;
       }
       const parent = this.getNode(segs.slice(0, -1));
       if (!parent || parent.type !== "dir") {
-        this.printLine(`bash: ${redir.target}: No such file or directory`);
+        this.printLine(`bash: ${target}: No such file or directory`);
         return;
       }
       let final = content;
-      if (redir.append && existing && existing.type === "file") {
+      if (append && existing && existing.type === "file") {
         const prev = existing.content || "";
-        final = prev + (prev && content ? "\n" : "") + content;
+        final = prev + content;
       }
       try {
         this.writeFile(segs, final);
@@ -635,34 +744,118 @@
       }
     }
 
-    // run a command string without echoing the prompt (used by deep links too)
-    async exec(input) {
-      const redir = this.parseRedirect(input.trim());
-      if (redir) return this.execRedirect(redir);
-
-      const parts = input.trim().split(/\s+/);
-      const name = parts[0];
-      const args = parts.slice(1);
+    // run a single command (token list). If capture is true, buffer output
+    // instead of printing. stdin is optional text from a previous pipe stage.
+    async runTokens(tokens, opts = {}) {
+      const { stdin = null, capture = false } = opts;
+      if (!tokens.length) return { output: "" };
+      const name = tokens[0];
+      const args = tokens.slice(1);
       const cmd = TERM.commands[name];
+      if (!cmd) return { error: this.notFound(name) };
 
-      if (!cmd) {
-        this.printLine(this.notFound(name));
-        return;
-      }
-
+      const buf = [];
+      const push = (t) => buf.push(t == null ? "" : String(t));
       const ctx = {
-        print: (t) => this.printLine(t),
-        printHTML: (h) => this.printHTMLLine(h),
-        printBlock: (t) => this.printBlock(t),
+        stdin: stdin == null ? null : String(stdin),
+        capture,
+        print: capture ? push : (t) => this.printLine(t),
+        printBlock: capture ? push : (t) => this.printBlock(t),
+        printHTML: capture
+          ? (h) => push(stripTags(h))
+          : (h) => this.printHTMLLine(h),
         esc: escapeHtml,
         term: this,
       };
 
       try {
-        const out = await cmd.run(args, ctx);
-        if (out != null && out !== "") this.printLine(out);
+        const ret = await cmd.run(args, ctx);
+        if (ret != null && ret !== "") {
+          if (capture) push(ret);
+          else this.printLine(ret);
+        }
       } catch (err) {
-        this.printLine(`${name}: ${err && err.message ? err.message : "error"}`);
+        const msg = `${name}: ${err && err.message ? err.message : "error"}`;
+        if (capture) return { error: msg, output: buf.join("\n") };
+        this.printLine(msg);
+        return { output: "" };
+      }
+      return { output: buf.join("\n") };
+    }
+
+    // run a command string without echoing the prompt (used by deep links too)
+    async exec(input) {
+      let tokens;
+      try {
+        tokens = tokenize(input.trim());
+      } catch (e) {
+        this.printLine("bash: " + (e && e.message ? e.message : "parse error"));
+        return;
+      }
+      if (!tokens.length) return;
+      tokens = this.expandAliases(tokens);
+
+      // split pipeline on bare `|`
+      const stages = [];
+      let cur = [];
+      for (const t of tokens) {
+        if (t === "|") {
+          stages.push(cur);
+          cur = [];
+        } else {
+          cur.push(t);
+        }
+      }
+      stages.push(cur);
+      if (stages.some((s) => !s.length)) {
+        this.printLine("bash: syntax error near unexpected token `|'");
+        return;
+      }
+
+      // redirect only applies to the last stage
+      let redir = null;
+      const last = stages[stages.length - 1];
+      const ri = last.findIndex((t) => t === ">" || t === ">>");
+      if (ri >= 0) {
+        const op = last[ri];
+        const target = last[ri + 1];
+        if (!target) {
+          this.printLine(
+            "bash: syntax error near unexpected token `newline'"
+          );
+          return;
+        }
+        if (last[ri + 2]) {
+          this.printLine("bash: syntax error near unexpected token `" + last[ri + 2] + "'");
+          return;
+        }
+        redir = { append: op === ">>", target };
+        stages[stages.length - 1] = last.slice(0, ri);
+        if (!stages[stages.length - 1].length) {
+          // `> file` with no command — treat as truncate/create empty
+          this.writeRedirectTarget(target, "", redir.append);
+          return;
+        }
+      }
+
+      let stdin = null;
+      for (let i = 0; i < stages.length; i++) {
+        const isLast = i === stages.length - 1;
+        const capture = !isLast || !!redir;
+        const result = await this.runTokens(stages[i], { stdin, capture });
+        if (result.error) {
+          this.printLine(result.error);
+          return;
+        }
+        if (!isLast) {
+          stdin = result.output;
+        } else if (redir) {
+          this.writeRedirectTarget(
+            redir.target,
+            result.output,
+            redir.append
+          );
+        }
       }
     }
 
@@ -812,6 +1005,91 @@
       };
       this.printLine("Wake up, Neo... (press any key to exit)");
       draw();
+    }
+
+    // `less` / `more` — fullscreen pager. Space/f/PageDown forward, b/PageUp
+    // back (less only), q/Esc quit. `more` is forward-only.
+    pager(text, opts = {}) {
+      if (this._editorOpen || this._fsnOpen || this._pagerOpen) return;
+      this._pagerOpen = true;
+      const forwardOnly = !!opts.forwardOnly;
+      const lines = String(text == null ? "" : text).split("\n");
+      // leave room for the status line
+      const pageSize = () =>
+        Math.max(5, Math.floor((window.innerHeight - 40) / 18) - 1);
+
+      const overlay = document.createElement("div");
+      overlay.className = "pager-overlay";
+      const pre = document.createElement("pre");
+      pre.className = "pager-body";
+      const status = document.createElement("div");
+      status.className = "pager-status";
+      overlay.appendChild(pre);
+      overlay.appendChild(status);
+      document.body.appendChild(overlay);
+
+      let top = 0;
+      const render = () => {
+        const ps = pageSize();
+        const slice = lines.slice(top, top + ps);
+        pre.textContent = slice.join("\n");
+        const atEnd = top + ps >= lines.length;
+        const pct =
+          lines.length <= 1
+            ? 100
+            : Math.min(100, Math.round(((top + slice.length) / lines.length) * 100));
+        const name = forwardOnly ? "More" : "Less";
+        status.textContent = atEnd
+          ? `${name} — (END) · q quit`
+          : `${name} — ${pct}% · Space forward` +
+            (forwardOnly ? " · q quit" : " · b back · q quit");
+      };
+
+      const close = () => {
+        if (!this._pagerOpen) return;
+        this._pagerOpen = false;
+        window.removeEventListener("keydown", onKey, true);
+        window.removeEventListener("resize", render);
+        overlay.remove();
+        this.focus();
+      };
+
+      const onKey = (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        const ps = pageSize();
+        if (e.key === "q" || e.key === "Q" || e.key === "Escape") close();
+        else if (
+          e.key === " " ||
+          e.key === "f" ||
+          e.key === "F" ||
+          e.key === "PageDown" ||
+          e.key === "Enter"
+        ) {
+          if (top + ps >= lines.length) {
+            if (forwardOnly) close();
+            return;
+          }
+          top = Math.min(lines.length - 1, top + ps);
+          render();
+        } else if (
+          !forwardOnly &&
+          (e.key === "b" || e.key === "B" || e.key === "PageUp")
+        ) {
+          top = Math.max(0, top - ps);
+          render();
+        } else if (!forwardOnly && e.key === "g") {
+          top = 0;
+          render();
+        } else if (!forwardOnly && e.key === "G") {
+          top = Math.max(0, lines.length - ps);
+          render();
+        }
+      };
+
+      window.addEventListener("keydown", onKey, true);
+      window.addEventListener("resize", render);
+      render();
     }
 
     // `vi`/`vim` — a full-screen, "looks-like-vi" editor (MVP). Modal in feel:
@@ -1203,6 +1481,71 @@
   }
 
   // --- small utilities -------------------------------------------------------
+
+  // shell-ish tokenizer: whitespace split with ', ", \, and bare | > >> operators
+  function tokenize(input) {
+    const tokens = [];
+    const s = String(input);
+    let i = 0;
+    while (i < s.length) {
+      while (i < s.length && /\s/.test(s[i])) i++;
+      if (i >= s.length) break;
+
+      // bare operators (also splits attached forms like `>file`)
+      if (s[i] === "|") {
+        tokens.push("|");
+        i++;
+        continue;
+      }
+      if (s[i] === ">") {
+        if (s[i + 1] === ">") {
+          tokens.push(">>");
+          i += 2;
+        } else {
+          tokens.push(">");
+          i++;
+        }
+        continue;
+      }
+
+      let tok = "";
+      let quote = null;
+      while (i < s.length) {
+        const c = s[i];
+        if (quote) {
+          if (c === "\\" && quote === '"' && i + 1 < s.length) {
+            tok += s[i + 1];
+            i += 2;
+            continue;
+          }
+          if (c === quote) {
+            quote = null;
+            i++;
+            continue;
+          }
+          tok += c;
+          i++;
+          continue;
+        }
+        if (c === '"' || c === "'") {
+          quote = c;
+          i++;
+          continue;
+        }
+        if (c === "\\" && i + 1 < s.length) {
+          tok += s[i + 1];
+          i += 2;
+          continue;
+        }
+        if (/\s/.test(c) || c === "|" || c === ">") break;
+        tok += c;
+        i++;
+      }
+      if (quote) throw new Error("unexpected EOF while looking for matching quote");
+      tokens.push(tok);
+    }
+    return tokens;
+  }
 
   // the classic `sl` steam locomotive (D51). String.raw keeps the backslashes.
   const TRAIN = String.raw`      ====        ________                ___________

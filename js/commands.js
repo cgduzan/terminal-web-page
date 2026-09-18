@@ -21,6 +21,193 @@
  * Loaded after config.js, before terminal.js.
  */
 
+// --- shared helpers (filesystem commands) ---------------------------------
+
+function readFileContent(arg, ctx, cmd) {
+  const path = ctx.term.resolve(arg);
+  const node = path && ctx.term.node(path);
+  if (!node) return { error: `${cmd}: ${arg}: No such file or directory` };
+  if (node.type === "dir") return { error: `${cmd}: ${arg}: Is a directory` };
+  if (node.locked) {
+    ctx.term.denied();
+    return { error: null, denied: true };
+  }
+  if (!ctx.term.canRead(path)) {
+    return { error: `${cmd}: ${arg}: Permission denied` };
+  }
+  if (node.type === "link") {
+    return { content: node.content || `Opening ${node.url}...`, node };
+  }
+  return { content: node.content == null ? "" : String(node.content), node };
+}
+
+// resolve file args, or fall back to pipe/redirect stdin when none given
+function inputsOrStdin(fileList, ctx, cmd, missingMsg) {
+  if (!fileList.length) {
+    if (ctx.stdin != null) return [{ name: "-", content: String(ctx.stdin) }];
+    return { error: missingMsg || `${cmd}: missing file operand` };
+  }
+  const out = [];
+  for (const arg of fileList) {
+    const r = readFileContent(arg, ctx, cmd);
+    if (r.denied) continue;
+    if (r.error) {
+      out.push({ error: r.error });
+      continue;
+    }
+    out.push({ name: arg, content: r.content });
+  }
+  return out;
+}
+
+function parseLineCount(args, defaultN) {
+  let n = defaultN;
+  const files = [];
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i];
+    if (a === "-n" && args[i + 1] != null) {
+      const parsed = parseInt(args[++i], 10);
+      if (!Number.isFinite(parsed) || parsed < 0)
+        return { error: `invalid line count: ${args[i]}` };
+      n = parsed;
+      continue;
+    }
+    if (/^-\d+$/.test(a)) {
+      n = parseInt(a.slice(1), 10);
+      continue;
+    }
+    if (a.startsWith("-")) continue;
+    files.push(a);
+  }
+  return { n, files };
+}
+
+function lsMode(child) {
+  if (child.mode && /^[-dl][r-][w-][x-][r-][w-][x-][r-][w-][x-]$/.test(child.mode))
+    return child.mode;
+  if (child.locked) return "-r--------";
+  if (child.type === "dir") return "drwxr-xr-x";
+  if (child.type === "link") return "lrwxrwxrwx";
+  return "-rw-r--r--";
+}
+
+function lsByteSize(child) {
+  if (child.type === "dir") return 4096;
+  return String(child.content == null ? "" : child.content).length;
+}
+
+function lsHumanSize(bytes) {
+  if (bytes < 1024) return String(bytes);
+  if (bytes < 1024 * 1024) {
+    const k = bytes / 1024;
+    return (k >= 10 ? k.toFixed(0) : k.toFixed(1)) + "K";
+  }
+  const m = bytes / (1024 * 1024);
+  return (m >= 10 ? m.toFixed(0) : m.toFixed(1)) + "M";
+}
+
+const LS_DEFAULT_MTIME = "Sep 17 12:00";
+
+function lsMtime(child) {
+  if (child.mtime == null) return LS_DEFAULT_MTIME;
+  const d = new Date(child.mtime);
+  if (Number.isNaN(d.getTime())) return LS_DEFAULT_MTIME;
+  const months = [
+    "Jan",
+    "Feb",
+    "Mar",
+    "Apr",
+    "May",
+    "Jun",
+    "Jul",
+    "Aug",
+    "Sep",
+    "Oct",
+    "Nov",
+    "Dec",
+  ];
+  const mon = months[d.getMonth()];
+  const day = String(d.getDate()).padStart(2, " ");
+  const hh = String(d.getHours()).padStart(2, "0");
+  const mm = String(d.getMinutes()).padStart(2, "0");
+  return `${mon} ${day} ${hh}:${mm}`;
+}
+
+function lsNameHtml(name, child, esc) {
+  if (child.type === "dir") return `<span class="fs-dir">${esc(name)}/</span>`;
+  if (child.type === "link") return `<span class="fs-link">${esc(name)}</span>`;
+  if (child.locked) return `<span class="fs-locked">${esc(name)}</span>`;
+  return `<span class="fs-file">${esc(name)}</span>`;
+}
+
+function interpretEchoEscapes(s) {
+  return String(s)
+    .replace(/\\n/g, "\n")
+    .replace(/\\t/g, "\t")
+    .replace(/\\r/g, "\r")
+    .replace(/\\e/g, "\u001b")
+    .replace(/\\\\/g, "\\");
+}
+
+function formatDirStack(term) {
+  const abs = (segs) => "/" + segs.join("/");
+  const homeAbs = abs(term.home);
+  const pretty = (segs) => {
+    const a = abs(segs);
+    if (a === homeAbs) return "~";
+    if (a.startsWith(homeAbs + "/")) return "~" + a.slice(homeAbs.length);
+    return a;
+  };
+  const stack = [term.cwd].concat(term.dirstack.slice().reverse());
+  return stack.map(pretty).join(" ");
+}
+
+// chmod mode: octal 3-digit (e.g. 644) or symbolic u/g/o/a ± rwx (simple)
+function applyChmodMode(currentMode, spec) {
+  const type = currentMode[0] || "-";
+  let chars = currentMode.slice(1).split("");
+  if (chars.length !== 9) chars = "rw-r--r--".split("");
+
+  if (/^[0-7]{3,4}$/.test(spec)) {
+    const oct = spec.slice(-3);
+    const map = (n) => {
+      const v = parseInt(n, 8);
+      return [
+        v & 4 ? "r" : "-",
+        v & 2 ? "w" : "-",
+        v & 1 ? "x" : "-",
+      ];
+    };
+    chars = map(oct[0]).concat(map(oct[1]), map(oct[2]));
+    return type + chars.join("");
+  }
+
+  // symbolic: [ugoa]*[+-=][rwx]+  (one clause)
+  const m = spec.match(/^([ugoa]*)([+-=])([rwx]+)$/);
+  if (!m) return null;
+  let who = m[1] || "a";
+  if (who === "a") who = "ugo";
+  const op = m[2];
+  const bits = m[3];
+  const idx = { u: 0, g: 3, o: 6 };
+  const bitPos = { r: 0, w: 1, x: 2 };
+  for (const w of who) {
+    const base = idx[w];
+    if (base == null) continue;
+    if (op === "=") {
+      chars[base] = "-";
+      chars[base + 1] = "-";
+      chars[base + 2] = "-";
+    }
+    for (const b of bits) {
+      const p = base + bitPos[b];
+      if (op === "+" || op === "=") chars[p] = b;
+      else if (op === "-") chars[p] = "-";
+    }
+  }
+  return type + chars.join("");
+}
+
 TERM.commands = {
   help: {
     desc: "List available commands",
@@ -63,9 +250,24 @@ TERM.commands = {
   echo: {
     desc: "Print text back",
     native: true,
-    usage: "echo <text>",
-    run(args) {
-      return args.join(" ");
+    usage: "echo [-ne] <text>",
+    flags: ["-n", "-e", "-E"],
+    run(args, ctx) {
+      let noNewline = false;
+      let escapes = false;
+      let i = 0;
+      while (i < args.length && /^-[neE]+$/.test(args[i])) {
+        for (const c of args[i].slice(1)) {
+          if (c === "n") noNewline = true;
+          if (c === "e") escapes = true;
+          if (c === "E") escapes = false;
+        }
+        i++;
+      }
+      let s = args.slice(i).join(" ");
+      if (escapes) s = interpretEchoEscapes(s);
+      if (ctx.capture) return noNewline ? s : s + "\n";
+      return s;
     },
   },
 
@@ -116,47 +318,128 @@ TERM.commands = {
   ls: {
     desc: "List directory contents",
     native: true,
-    usage: "ls [-a] [path]",
+    usage: "ls [-alh] [path]",
+    flags: ["-a", "-l", "-h", "-la", "-al", "-lh", "-hl", "-alh", "-lah", "-hla"],
     run(args, ctx) {
-      const showHidden = args.includes("-a");
+      const flags = args.filter((a) => a.startsWith("-")).join("");
+      const showHidden = flags.includes("a");
+      const longFmt = flags.includes("l");
+      const human = flags.includes("h");
       const target = args.find((a) => !a.startsWith("-"));
       const path = ctx.term.resolve(target || ".");
       const node = path && ctx.term.node(path);
-      if (!node) return `ls: cannot access '${target}': No such file or directory`;
-      if (node.type !== "dir") return ctx.esc(target); // listing a file prints its name
+      if (!node)
+        return `ls: cannot access '${target}': No such file or directory`;
+
+      const user = TERM.identity.user;
+      const formatSize = (bytes) =>
+        human ? lsHumanSize(bytes) : String(bytes);
+
+      const longLine = (name, child, sizeWidth) => {
+        const mode = lsMode(child);
+        const nlink = child.type === "dir" ? "2" : "1";
+        const size = formatSize(lsByteSize(child)).padStart(sizeWidth);
+        const mtime = lsMtime(child);
+        const meta = `${mode}  ${nlink} ${user} ${user} ${size} ${mtime} `;
+        return ctx.esc(meta) + lsNameHtml(name, child, ctx.esc);
+      };
+
+      if (node.type !== "dir") {
+        const name = target || ".";
+        if (!longFmt) {
+          ctx.printHTML(lsNameHtml(name, node, ctx.esc));
+          return;
+        }
+        const sizeStr = formatSize(lsByteSize(node));
+        ctx.printHTML(longLine(name, node, sizeStr.length));
+        return;
+      }
+
       const entries = Object.entries(ctx.term.listDir(path))
         .filter(([name]) => showHidden || !name.startsWith("."))
         .sort(([a], [b]) => a.localeCompare(b));
-      if (!entries.length) {
-        ctx.print("");
+
+      if (!longFmt) {
+        if (!entries.length) {
+          ctx.print("");
+          return;
+        }
+        const html = entries
+          .map(([name, child]) => lsNameHtml(name, child, ctx.esc))
+          .join("   ");
+        ctx.printHTML(html);
         return;
       }
-      const html = entries
-        .map(([name, child]) => {
-          if (child.type === "dir")
-            return `<span class="fs-dir">${ctx.esc(name)}/</span>`;
-          if (child.type === "link")
-            return `<span class="fs-link">${ctx.esc(name)}</span>`;
-          if (child.locked)
-            return `<span class="fs-locked">${ctx.esc(name)}</span>`;
-          return `<span class="fs-file">${ctx.esc(name)}</span>`;
-        })
-        .join("   ");
-      ctx.printHTML(html);
+
+      const sizes = entries.map(([, child]) => formatSize(lsByteSize(child)));
+      const sizeWidth = sizes.reduce((w, s) => Math.max(w, s.length), 1);
+      const totalBlocks = entries.reduce(
+        (sum, [, child]) => sum + Math.ceil(lsByteSize(child) / 1024),
+        0
+      );
+      const lines = [`total ${totalBlocks}`].concat(
+        entries.map(([name, child]) => longLine(name, child, sizeWidth))
+      );
+      ctx.printHTML(lines.join("\n"));
     },
   },
 
   cd: {
     desc: "Change directory",
     native: true,
-    usage: "cd [path]",
+    usage: "cd [-|path]",
+    flags: ["-"],
+    run(args, ctx) {
+      let target = args[0] || "~";
+      let printPath = false;
+      if (target === "-") {
+        if (!ctx.term.oldpwd) return "cd: OLDPWD not set";
+        target = "/" + ctx.term.oldpwd.join("/");
+        printPath = true;
+      }
+      const path = ctx.term.resolve(target);
+      const node = path && ctx.term.node(path);
+      if (!node) return `cd: no such file or directory: ${args[0] || target}`;
+      if (node.type !== "dir") return `cd: not a directory: ${args[0] || target}`;
+      ctx.term.setCwd(path);
+      if (printPath) return ctx.term.pwdString();
+    },
+  },
+
+  pushd: {
+    desc: "Push directory onto stack and cd",
+    native: true,
+    usage: "pushd [path]",
     run(args, ctx) {
       const target = args[0] || "~";
       const path = ctx.term.resolve(target);
       const node = path && ctx.term.node(path);
-      if (!node) return `cd: no such file or directory: ${target}`;
-      if (node.type !== "dir") return `cd: not a directory: ${target}`;
-      ctx.term.cwd = path;
+      if (!node) return `pushd: no such file or directory: ${target}`;
+      if (node.type !== "dir") return `pushd: not a directory: ${target}`;
+      ctx.term.dirstack.push(ctx.term.cwd.slice());
+      ctx.term.setCwd(path);
+      return formatDirStack(ctx.term);
+    },
+  },
+
+  popd: {
+    desc: "Pop directory from stack and cd",
+    native: true,
+    usage: "popd",
+    run(_args, ctx) {
+      if (!ctx.term.dirstack.length) return "popd: directory stack empty";
+      const next = ctx.term.dirstack.pop();
+      ctx.term.setCwd(next);
+      return formatDirStack(ctx.term);
+    },
+  },
+
+  dirs: {
+    desc: "Display the directory stack",
+    native: true,
+    usage: "dirs",
+    run(_args, ctx) {
+      return formatDirStack(ctx.term);
     },
   },
 
@@ -165,31 +448,134 @@ TERM.commands = {
     native: true,
     usage: "cat <file>",
     run(args, ctx) {
-      if (!args.length) return "cat: missing file operand. Try 'cat about.txt'.";
+      const inputs = inputsOrStdin(
+        args,
+        ctx,
+        "cat",
+        "cat: missing file operand. Try 'cat about.txt'."
+      );
+      if (inputs.error) return inputs.error;
       const out = [];
-      for (const arg of args) {
-        const path = ctx.term.resolve(arg);
-        const node = path && ctx.term.node(path);
-        if (!node) {
-          out.push(`cat: ${arg}: No such file or directory`);
+      for (const item of inputs) {
+        if (item.error) {
+          out.push(item.error);
           continue;
         }
-        if (node.type === "dir") {
-          out.push(`cat: ${arg}: Is a directory`);
-          continue;
+        if (item.name !== "-") {
+          const path = ctx.term.resolve(item.name);
+          const node = path && ctx.term.node(path);
+          if (node && node.type === "link") ctx.term.openLink(node.url);
         }
-        if (node.locked) {
-          ctx.term.denied();
-          continue;
-        }
-        if (node.type === "link") {
-          ctx.term.openLink(node.url);
-          out.push(node.content || `Opening ${node.url}...`);
-          continue;
-        }
-        out.push(node.content);
+        out.push(item.content);
       }
       return out.join("\n");
+    },
+  },
+
+  head: {
+    desc: "Print the first lines of a file",
+    native: true,
+    usage: "head [-n N] <file>",
+    flags: ["-n"],
+    run(args, ctx) {
+      const parsed = parseLineCount(args, 10);
+      if (parsed.error) return `head: ${parsed.error}`;
+      const inputs = inputsOrStdin(parsed.files, ctx, "head");
+      if (inputs.error) return inputs.error;
+      const out = [];
+      const multi = inputs.length > 1;
+      for (const item of inputs) {
+        if (item.error) {
+          out.push(item.error);
+          continue;
+        }
+        const lines = String(item.content).split("\n").slice(0, parsed.n);
+        if (multi) out.push(`==> ${item.name} <==`);
+        out.push(lines.join("\n"));
+      }
+      return out.join("\n");
+    },
+  },
+
+  tail: {
+    desc: "Print the last lines of a file",
+    native: true,
+    usage: "tail [-n N] <file>",
+    flags: ["-n"],
+    run(args, ctx) {
+      const parsed = parseLineCount(args, 10);
+      if (parsed.error) return `tail: ${parsed.error}`;
+      const inputs = inputsOrStdin(parsed.files, ctx, "tail");
+      if (inputs.error) return inputs.error;
+      const out = [];
+      const multi = inputs.length > 1;
+      for (const item of inputs) {
+        if (item.error) {
+          out.push(item.error);
+          continue;
+        }
+        const all = String(item.content).split("\n");
+        const lines = all.slice(Math.max(0, all.length - parsed.n));
+        if (multi) out.push(`==> ${item.name} <==`);
+        out.push(lines.join("\n"));
+      }
+      return out.join("\n");
+    },
+  },
+
+  wc: {
+    desc: "Count lines, words, and bytes",
+    native: true,
+    usage: "wc [-lwc] <file>",
+    flags: ["-l", "-w", "-c", "-lw", "-lc", "-wc", "-lwc"],
+    run(args, ctx) {
+      const flags = args.filter((a) => a.startsWith("-")).join("");
+      const files = args.filter((a) => !a.startsWith("-"));
+      const inputs = inputsOrStdin(
+        files,
+        ctx,
+        "wc",
+        "wc: no stdin here — pass a file"
+      );
+      if (inputs.error) return inputs.error;
+      const any =
+        flags.includes("l") || flags.includes("w") || flags.includes("c");
+      const wantL = any ? flags.includes("l") : true;
+      const wantW = any ? flags.includes("w") : true;
+      const wantC = any ? flags.includes("c") : true;
+      const out = [];
+      for (const item of inputs) {
+        if (item.error) {
+          out.push(item.error);
+          continue;
+        }
+        const text = String(item.content);
+        const lineCount = (text.match(/\n/g) || []).length;
+        const wordCount = (text.match(/\S+/g) || []).length;
+        const byteCount = text.length;
+        const cols = [];
+        if (wantL) cols.push(String(lineCount).padStart(7));
+        if (wantW) cols.push(String(wordCount).padStart(7));
+        if (wantC) cols.push(String(byteCount).padStart(7));
+        if (item.name !== "-") cols.push(item.name);
+        out.push(cols.join(" "));
+      }
+      return out.join("\n");
+    },
+  },
+
+  uname: {
+    desc: "Print system information",
+    native: true,
+    usage: "uname [-a]",
+    flags: ["-a"],
+    run(args, ctx) {
+      const flags = args.filter((a) => a.startsWith("-")).join("");
+      if (flags.includes("a")) {
+        const host = ctx.term.host;
+        return `ChrisOS ${host} 6.1.0-chrisos #1 SMP PREEMPT_DYNAMIC ChrisOS web x86_64 GNU/Linux`;
+      }
+      return "ChrisOS";
     },
   },
 
@@ -222,6 +608,266 @@ TERM.commands = {
     },
   },
 
+  grep: {
+    desc: "Print lines matching a pattern",
+    native: true,
+    usage: "grep [-in] <pattern> [file...]",
+    flags: ["-i", "-n", "-in", "-ni"],
+    run(args, ctx) {
+      const flags = args.filter((a) => a.startsWith("-") && a !== "-").join("");
+      const rest = args.filter((a) => !a.startsWith("-") || a === "-");
+      // allow `grep - pattern` via stdin only; first non-flag is pattern
+      const ignoreCase = flags.includes("i");
+      const showNum = flags.includes("n");
+      if (!rest.length) return "grep: missing pattern";
+      const pattern = rest[0];
+      const files = rest.slice(1);
+      let re;
+      try {
+        re = new RegExp(pattern, ignoreCase ? "i" : "");
+      } catch (e) {
+        return `grep: invalid pattern: ${e.message}`;
+      }
+      const inputs = inputsOrStdin(
+        files,
+        ctx,
+        "grep",
+        "grep: no stdin here — pass a file or pipe into grep"
+      );
+      if (inputs.error) return inputs.error;
+      const out = [];
+      const multi = inputs.filter((x) => !x.error).length > 1;
+      for (const item of inputs) {
+        if (item.error) {
+          out.push(item.error);
+          continue;
+        }
+        const lines = String(item.content).split("\n");
+        lines.forEach((line, idx) => {
+          if (!re.test(line)) return;
+          let prefix = "";
+          if (multi && item.name !== "-") prefix += item.name + ":";
+          if (showNum) prefix += idx + 1 + ":";
+          out.push(prefix + line);
+        });
+      }
+      return out.join("\n");
+    },
+  },
+
+  find: {
+    desc: "Walk a directory tree",
+    native: true,
+    usage: "find [path] [-name pattern]",
+    flags: ["-name"],
+    run(args, ctx) {
+      let startArg = ".";
+      let namePat = null;
+      for (let i = 0; i < args.length; i++) {
+        if (args[i] === "-name" && args[i + 1] != null) {
+          namePat = args[++i];
+          continue;
+        }
+        if (args[i].startsWith("-")) continue;
+        startArg = args[i];
+      }
+      const start = ctx.term.resolve(startArg);
+      const node = start && ctx.term.node(start);
+      if (!node) return `find: '${startArg}': No such file or directory`;
+
+      const matchName = (name) => {
+        if (!namePat) return true;
+        const re = new RegExp(
+          "^" +
+            namePat
+              .replace(/[.+^${}()|[\]\\]/g, "\\$&")
+              .replace(/\*/g, ".*")
+              .replace(/\?/g, ".") +
+            "$"
+        );
+        return re.test(name);
+      };
+
+      const showPath = (segs) => {
+        if (startArg === ".") {
+          const rel = segs.slice(start.length).join("/");
+          return rel ? "./" + rel : ".";
+        }
+        return "/" + segs.join("/");
+      };
+
+      const lines = [];
+      const walk = (segs) => {
+        const n = ctx.term.node(segs);
+        if (!n) return;
+        const base =
+          segs.length === 0 ? "/" : segs[segs.length - 1];
+        if (segs.length === start.length) {
+          if (!namePat || matchName(base)) lines.push(showPath(segs));
+        } else if (matchName(base)) {
+          lines.push(showPath(segs));
+        }
+        if (n.type !== "dir") return;
+        const children = ctx.term.listDir(segs) || {};
+        for (const name of Object.keys(children).sort())
+          walk(segs.concat(name));
+      };
+      walk(start);
+      return lines.join("\n");
+    },
+  },
+
+  which: {
+    desc: "Locate a command",
+    native: true,
+    usage: "which <command>",
+    run(args, ctx) {
+      if (!args.length) return "which: missing operand";
+      const aliases = ctx.term.allAliases();
+      const out = [];
+      for (const name of args) {
+        if (TERM.commands[name] || aliases[name]) {
+          out.push(`/bin/${name}`);
+        } else {
+          out.push(
+            `which: no ${name} in (/usr/local/bin:/usr/bin:/bin)`
+          );
+        }
+      }
+      return out.join("\n");
+    },
+  },
+
+  env: {
+    desc: "Print environment variables",
+    native: true,
+    usage: "env",
+    run(_args, ctx) {
+      const env = Object.assign(
+        {
+          HOME: "/home/guest",
+          USER: TERM.identity.user,
+          LOGNAME: TERM.identity.user,
+          PATH: "/usr/local/bin:/usr/bin:/bin",
+          EDITOR: "vim",
+          TERM: "xterm-256color",
+          HOSTNAME: ctx.term.host,
+          PWD: ctx.term.pwdString(),
+          SHELL: "/bin/bash",
+        },
+        TERM.fakeEnv || {}
+      );
+      if (ctx.term.oldpwd)
+        env.OLDPWD = "/" + ctx.term.oldpwd.join("/");
+      return Object.keys(env)
+        .sort()
+        .map((k) => `${k}=${env[k]}`)
+        .join("\n");
+    },
+  },
+
+  chmod: {
+    desc: "Change file mode bits",
+    native: true,
+    usage: "chmod <mode> <file>",
+    run(args, ctx) {
+      if (args.length < 2) return "chmod: missing operand";
+      const modeSpec = args[0];
+      const targets = args.slice(1);
+      const out = [];
+      for (const arg of targets) {
+        const segs = ctx.term.resolve(arg);
+        const node = ctx.term.getNode(segs);
+        if (!node) {
+          out.push(`chmod: cannot access '${arg}': No such file or directory`);
+          continue;
+        }
+        if (!ctx.term.canWrite(segs)) {
+          out.push(`chmod: changing permissions of '${arg}': Operation not permitted`);
+          continue;
+        }
+        const next = applyChmodMode(lsMode(node), modeSpec);
+        if (!next) {
+          out.push(`chmod: invalid mode: '${modeSpec}'`);
+          return out.join("\n");
+        }
+        ctx.term.patchNode(segs, { mode: next });
+      }
+      return out.join("\n");
+    },
+  },
+
+  less: {
+    desc: "Page through a file",
+    native: true,
+    usage: "less <file>",
+    run(args, ctx) {
+      const inputs = inputsOrStdin(args, ctx, "less");
+      if (inputs.error) return inputs.error;
+      const parts = [];
+      for (const item of inputs) {
+        if (item.error) return item.error;
+        parts.push(item.content);
+      }
+      const text = parts.join("\n");
+      if (ctx.capture) return text;
+      ctx.term.pager(text, { forwardOnly: false });
+    },
+  },
+
+  more: {
+    desc: "Page through a file (forward only)",
+    native: true,
+    usage: "more <file>",
+    run(args, ctx) {
+      const inputs = inputsOrStdin(args, ctx, "more");
+      if (inputs.error) return inputs.error;
+      const parts = [];
+      for (const item of inputs) {
+        if (item.error) return item.error;
+        parts.push(item.content);
+      }
+      const text = parts.join("\n");
+      if (ctx.capture) return text;
+      ctx.term.pager(text, { forwardOnly: true });
+    },
+  },
+
+  alias: {
+    desc: "Define or list command aliases",
+    native: true,
+    usage: "alias [name[=value]]",
+    run(args, ctx) {
+      if (!args.length) {
+        const all = ctx.term.allAliases();
+        return Object.keys(all)
+          .sort()
+          .map((k) => `alias ${k}='${all[k]}'`)
+          .join("\n");
+      }
+      const out = [];
+      for (const a of args) {
+        const eq = a.indexOf("=");
+        if (eq === -1) {
+          const all = ctx.term.allAliases();
+          if (all[a] != null) out.push(`alias ${a}='${all[a]}'`);
+          else out.push(`bash: alias: ${a}: not found`);
+          continue;
+        }
+        const name = a.slice(0, eq);
+        let val = a.slice(eq + 1);
+        if (
+          (val.startsWith("'") && val.endsWith("'")) ||
+          (val.startsWith('"') && val.endsWith('"'))
+        )
+          val = val.slice(1, -1);
+        if (!name) return "bash: alias: invalid name";
+        ctx.term.sessionAliases[name] = val;
+      }
+      return out.join("\n");
+    },
+  },
+
   touch: {
     desc: "Create an empty file",
     native: true,
@@ -236,7 +882,12 @@ TERM.commands = {
           out.push(`touch: cannot touch '${arg}': Is a directory`);
           continue;
         }
-        if (!ctx.term.canWrite(segs)) {
+        if (node) {
+          if (!ctx.term.canModify(segs)) {
+            out.push(`touch: cannot touch '${arg}': Permission denied`);
+            continue;
+          }
+        } else if (!ctx.term.canWriteDir(segs.slice(0, -1))) {
           out.push(`touch: cannot touch '${arg}': Permission denied`);
           continue;
         }
@@ -264,11 +915,12 @@ TERM.commands = {
           out.push(`mkdir: cannot create directory '${arg}': File exists`);
           continue;
         }
-        if (!ctx.term.canWrite(segs)) {
+        const parentSegs = segs.slice(0, -1);
+        if (!ctx.term.canWriteDir(parentSegs)) {
           out.push(`mkdir: cannot create directory '${arg}': Permission denied`);
           continue;
         }
-        const parent = ctx.term.getNode(segs.slice(0, -1));
+        const parent = ctx.term.getNode(parentSegs);
         if (!parent || parent.type !== "dir") {
           out.push(`mkdir: cannot create directory '${arg}': No such file or directory`);
           continue;
@@ -282,7 +934,8 @@ TERM.commands = {
   rm: {
     desc: "Remove files or directories",
     native: true,
-    usage: "rm [-r] <path>",
+    usage: "rm [-rf] <path>",
+    flags: ["-r", "-f", "-rf", "-fr"],
     run(args, ctx) {
       const flags = args.filter((a) => a.startsWith("-")).join("");
       const targets = args.filter((a) => !a.startsWith("-"));
@@ -301,7 +954,8 @@ TERM.commands = {
           out.push(`rm: cannot remove '${arg}': No such file or directory`);
           continue;
         }
-        if (!ctx.term.canWrite(segs)) {
+        // unlink needs write on the parent directory (chmod 400 files can still be rm'd)
+        if (!ctx.term.canWriteDir(segs.slice(0, -1))) {
           out.push(`rm: cannot remove '${arg}': Permission denied`);
           continue;
         }
@@ -312,7 +966,7 @@ TERM.commands = {
         ctx.term.remove(segs, { recursive });
       }
       // if we deleted the directory we were standing in, retreat home
-      if (!ctx.term.exists(ctx.term.cwd)) ctx.term.cwd = ctx.term.home.slice();
+      if (!ctx.term.exists(ctx.term.cwd)) ctx.term.setCwd(ctx.term.home);
       return out.join("\n");
     },
   },
@@ -321,6 +975,7 @@ TERM.commands = {
     desc: "Copy a file or directory",
     native: true,
     usage: "cp [-r] <src> <dst>",
+    flags: ["-r", "-R"],
     run(args, ctx) {
       const t = ctx.term;
       const flags = args.filter((a) => a.startsWith("-")).join("");
@@ -333,6 +988,8 @@ TERM.commands = {
       if (!srcNode) return `cp: cannot stat '${srcArg}': No such file or directory`;
       if (srcNode.type === "dir" && !recursive)
         return `cp: -r not specified; omitting directory '${srcArg}'`;
+      if (srcNode.type !== "dir" && !t.canRead(src))
+        return `cp: cannot open '${srcArg}' for reading: Permission denied`;
       let dst = t.resolve(dstArg);
       const dstNode = t.getNode(dst);
       if (dstNode && dstNode.type === "dir") dst = dst.concat(src[src.length - 1]);
@@ -340,7 +997,8 @@ TERM.commands = {
         return `cp: '${srcArg}' and '${dstArg}' are the same file`;
       if (t.pathKey(dst).startsWith(t.pathKey(src) + "/"))
         return `cp: cannot copy '${srcArg}' into itself, '${dstArg}'`;
-      if (!t.canWrite(dst)) return `cp: cannot create '${dstArg}': Permission denied`;
+      if (!t.canModify(dst))
+        return `cp: cannot create '${dstArg}': Permission denied`;
       const parent = t.getNode(dst.slice(0, -1));
       if (!parent || parent.type !== "dir")
         return `cp: cannot create '${dstArg}': No such file or directory`;
@@ -369,8 +1027,10 @@ TERM.commands = {
       if (t.pathKey(src) === t.pathKey(dst)) return; // no-op
       if (t.pathKey(dst).startsWith(t.pathKey(src) + "/"))
         return `mv: cannot move '${srcArg}' to a subdirectory of itself, '${dstArg}'`;
-      if (!t.canWrite(src)) return `mv: cannot move '${srcArg}': Permission denied`;
-      if (!t.canWrite(dst)) return `mv: cannot move to '${dstArg}': Permission denied`;
+      if (!t.canWriteDir(src.slice(0, -1)))
+        return `mv: cannot move '${srcArg}': Permission denied`;
+      if (!t.canModify(dst))
+        return `mv: cannot move to '${dstArg}': Permission denied`;
       const parent = t.getNode(dst.slice(0, -1));
       if (!parent || parent.type !== "dir")
         return `mv: cannot move to '${dstArg}': No such file or directory`;
@@ -381,7 +1041,7 @@ TERM.commands = {
         return `mv: cannot overwrite non-directory '${dstArg}' with directory`;
       t.copyTree(src, dst);
       t.remove(src, { recursive: true });
-      if (!t.exists(t.cwd)) t.cwd = t.home.slice();
+      if (!t.exists(t.cwd)) t.setCwd(t.home);
     },
   },
 
@@ -402,13 +1062,16 @@ TERM.commands = {
       if (node && node.type === "link") return `vi: ${arg}: cannot edit a link`;
       const name = segs[segs.length - 1] || arg;
       if (!node) {
-        if (!ctx.term.canWrite(segs))
+        if (!ctx.term.canModify(segs))
           return `vi: cannot create '${arg}': Permission denied`;
         const parent = ctx.term.getNode(segs.slice(0, -1));
         if (!parent || parent.type !== "dir")
           return `vi: cannot open '${arg}': No such file or directory`;
+      } else if (!ctx.term.canRead(segs)) {
+        return `vi: ${arg}: Permission denied`;
       }
-      ctx.term.editor(segs, node ? node.content || "" : "", ctx.term.canWrite(segs), name);
+      const writable = ctx.term.canModify(segs);
+      ctx.term.editor(segs, node ? node.content || "" : "", writable, name);
     },
   },
 
@@ -426,6 +1089,8 @@ TERM.commands = {
     native: true,
     run(_args, ctx) {
       ctx.term.resetFs();
+      ctx.term.oldpwd = null;
+      ctx.term.dirstack = [];
       ctx.term.cwd = ctx.term.home.slice();
       return "Filesystem reset — your created/edited files were cleared.";
     },

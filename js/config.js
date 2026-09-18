@@ -28,6 +28,15 @@ TERM.identity = {
   standardSite: "", // e.g. "https://chrisduzan.com"
 };
 
+// Built-in aliases (expand before the command runs). Session `alias` adds more.
+TERM.aliases = {
+  ll: "ls -la",
+  "..": "cd ..",
+};
+
+// Optional extra env vars for `env` (merged over defaults).
+TERM.fakeEnv = {};
+
 // --- BANNER -----------------------------------------------------------------
 
 TERM.banner = `
@@ -81,13 +90,23 @@ TERM.fs = dir({
     cp: bin("cp"),
     date: bin("date"),
     echo: bin("echo"),
+    env: bin("env"),
+    find: bin("find"),
+    grep: bin("grep"),
+    head: bin("head"),
+    less: bin("less"),
     ls: bin("ls"),
     mkdir: bin("mkdir"),
+    more: bin("more"),
     mv: bin("mv"),
     pwd: bin("pwd"),
     rm: bin("rm"),
     sh: bin("sh"),
+    tail: bin("tail"),
     touch: bin("touch"),
+    uname: bin("uname"),
+    wc: bin("wc"),
+    which: bin("which"),
     whoami: bin("whoami"),
   }),
   boot: dir({
@@ -236,7 +255,7 @@ a sentence on what it is, the stack, and a link.`
       }),
       ".bashrc": file(
         "# ~/.bashrc — sourced by imaginary login shells\n" +
-          "alias ll='ls -a'\n" +
+          "alias ll='ls -la'\n" +
           "alias ..='cd ..'\n" +
           "export EDITOR=vim\n"
       ),
