@@ -246,7 +246,9 @@ TERM.fsn = {
       window.matchMedia &&
       window.matchMedia("(prefers-reduced-motion: reduce)").matches;
     const FLY_MS = reduceMotion ? 0 : 0.75;
-    let camAnim = null; // { from, to, t, dur, onDone }
+    const REFRAME_MS = reduceMotion ? 0 : 0.35;
+    // kind: "fly" (enter/up — blocks keys) | "reframe" (selection — interruptible)
+    let camAnim = null; // { from, to, t, dur, onDone, kind }
 
     function copyCam() {
       return {
@@ -274,9 +276,12 @@ TERM.fsn = {
       cam.pitch = from.pitch + (to.pitch - from.pitch) * e;
     }
 
-    function animateCamTo(to, onDone) {
-      if (FLY_MS <= 0) {
+    function animateCamTo(to, onDone, opts = {}) {
+      const kind = opts.kind || "fly";
+      const dur = opts.dur != null ? opts.dur : FLY_MS;
+      if (dur <= 0) {
         Object.assign(cam, to);
+        camAnim = null;
         if (onDone) onDone();
         return;
       }
@@ -284,7 +289,8 @@ TERM.fsn = {
         from: copyCam(),
         to,
         t: 0,
-        dur: FLY_MS,
+        dur,
+        kind,
         onDone: onDone || null,
       };
     }
@@ -499,6 +505,96 @@ TERM.fsn = {
       if (idx < 0) idx = 0;
       idx = (idx + delta + order.length) % order.length;
       selected = list.indexOf(order[idx]);
+      ensureSelectionVisible();
+    }
+
+    // True when the box center projects into the safe viewport (with margin).
+    // Behind-camera / clipped items count as off-screen.
+    function isBoxVisible(box, pose) {
+      const p = projectFrom(
+        pose || cam,
+        box.x,
+        box.y + (box.h || 0) * 0.25,
+        box.z
+      );
+      if (!p) return false;
+      const m = Math.min(W, H) * 0.14;
+      return p.x >= m && p.x <= W - m && p.y >= m && p.y <= H - m;
+    }
+
+    // project() against an arbitrary camera pose (does not touch `cam`).
+    function projectFrom(pose, wx, wy, wz) {
+      const cy = Math.cos(pose.yaw);
+      const sy = Math.sin(pose.yaw);
+      let x = (wx - pose.x) * cy - (wz - pose.z) * sy;
+      let z = (wx - pose.x) * sy + (wz - pose.z) * cy;
+      const cp = Math.cos(pose.pitch);
+      const sp = Math.sin(pose.pitch);
+      const y = (wy - pose.y) * cp - z * sp;
+      z = (wy - pose.y) * sp + z * cp;
+      if (z <= 0.15) return null;
+      const fov = Math.min(W, H) * 0.9;
+      return {
+        x: W / 2 + (x / z) * fov,
+        y: H / 2 - (y / z) * fov,
+        z,
+      };
+    }
+
+    // Stay on the current-folder overlook; only pan far enough that `box`
+    // enters the safe viewport. Never adopts a child-folder overlook — Enter
+    // keeps that distinct "fly into" beat.
+    function frameSelection(box) {
+      const root = rootPlatform();
+      const home = root
+        ? overlookFor(root)
+        : {
+            x: cam.x,
+            y: cam.y,
+            z: cam.z,
+            yaw: Math.PI,
+            pitch: -0.55,
+          };
+
+      const by = box.y + (box.h || 0) * 0.25;
+      const m = Math.min(W, H) * 0.14;
+      const fov = Math.min(W, H) * 0.9;
+
+      const pose = { ...home };
+      let p = projectFrom(pose, box.x, by, box.z);
+
+      if (!p) {
+        // Behind / clipped from the home overlook — slide laterally onto it.
+        pose.x = box.x;
+        p = projectFrom(pose, box.x, by, box.z);
+      }
+
+      if (p) {
+        // Horizontal: nudge cam.x just past the margin (yaw≈π → screen-x ∝ cam.x).
+        if (p.x < m || p.x > W - m) {
+          const dxScreen = p.x < m ? m - p.x : W - m - p.x;
+          pose.x += (dxScreen * p.z) / fov;
+          p = projectFrom(pose, box.x, by, box.z);
+        }
+        // Depth: if still above/below the safe band (far child platforms),
+        // ease forward a little — capped so we don't settle on the child.
+        if (p && (p.y < m || p.y > H - m)) {
+          const pull = Math.min(5, Math.abs(pose.z - (box.z + 12)));
+          pose.z -= pull; // home sits +z of the scene; move toward children
+        }
+      }
+
+      return pose;
+    }
+
+    function ensureSelectionVisible() {
+      const box = selectable()[selected];
+      if (!box) return;
+      if (isBoxVisible(box)) return;
+      animateCamTo(frameSelection(box), null, {
+        dur: REFRAME_MS,
+        kind: "reframe",
+      });
     }
 
     function draw() {
@@ -573,7 +669,26 @@ TERM.fsn = {
     // --- input / loop -------------------------------------------------------
 
     function moveCam(dt) {
-      if (camAnim || notepadEl) return; // don't fight fly-to / notepad
+      if (notepadEl) return;
+      if (camAnim) {
+        // Let WASD / Alt-look take over a selection reframe mid-flight.
+        const steering =
+          keys.w ||
+          keys.s ||
+          keys.a ||
+          keys.d ||
+          keys.q ||
+          keys.e ||
+          keys.PageUp ||
+          keys.PageDown ||
+          (keys.Alt &&
+            (keys.ArrowLeft ||
+              keys.ArrowRight ||
+              keys.ArrowUp ||
+              keys.ArrowDown));
+        if (camAnim.kind === "reframe" && steering) camAnim = null;
+        else return;
+      }
       const speed = (keys.Shift ? 14 : 7) * dt;
       const forward = {
         x: Math.sin(cam.yaw),
@@ -758,7 +873,9 @@ TERM.fsn = {
         close();
         return;
       }
-      if (notepadEl || camAnim) return; // notepad / fly-to own the keys
+      if (notepadEl) return;
+      // Folder fly-to owns the keys; selection reframes stay interruptible.
+      if (camAnim && camAnim.kind !== "reframe") return;
       if (k === "Enter") {
         openSelected();
         return;
@@ -790,7 +907,11 @@ TERM.fsn = {
     }
 
     function onPtrDown(e) {
-      if (camAnim || notepadEl) return;
+      if (notepadEl) return;
+      if (camAnim) {
+        if (camAnim.kind === "reframe") camAnim = null;
+        else return;
+      }
       pointerDragging = true;
       ptrMoved = false;
       lastPtr = { x: e.clientX, y: e.clientY };
