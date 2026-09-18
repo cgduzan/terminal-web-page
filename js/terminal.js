@@ -42,6 +42,7 @@
       // persisted to localStorage. The seed (TERM.fs) stays read-only.
       this.loadOverlay();
       this._editorOpen = false;
+      this._fsnOpen = false;
 
       this.history = JSON.parse(localStorage.getItem("commandHistory") || "[]");
       this.historyIndex = this.history.length;
@@ -397,7 +398,7 @@
 
       // keep focus on the input whenever the user clicks the screen
       document.addEventListener("click", (e) => {
-        if (this._editorOpen) return; // editor owns focus while open
+        if (this._editorOpen || this._fsnOpen) return; // overlays own focus
         if (window.getSelection().toString()) return; // allow text selection
         this.focus();
       });
@@ -773,6 +774,12 @@
       }, 150);
     }
 
+    // Jurassic Park SGI File System Navigator — 3D fly-through of the fake FS.
+    // Implementation lives in fsn.js (TERM.fsn.open).
+    fsn(segs) {
+      if (typeof TERM.fsn?.open === "function") TERM.fsn.open(this, segs || this.cwd.slice());
+    }
+
     matrix() {
       if (document.querySelector(".matrix-overlay")) return;
       const canvas = document.createElement("canvas");
@@ -812,7 +819,7 @@
     // for :w / :q / :wq / :q! / :x (+ ! to force). Writes go through writeFile
     // and persist to the overlay. Not a real modal engine — no motions/yank.
     editor(segs, content, writable, name) {
-      if (this._editorOpen) return;
+      if (this._editorOpen || this._fsnOpen) return;
       this._editorOpen = true;
 
       const overlay = document.createElement("div");
@@ -1084,7 +1091,7 @@
       ];
       let buf = [];
       window.addEventListener("keydown", (e) => {
-        if (this._editorOpen) return; // don't capture keys while editing
+        if (this._editorOpen || this._fsnOpen) return;
         const k = e.key.length === 1 ? e.key.toLowerCase() : e.key;
         buf.push(k);
         if (buf.length > seq.length) buf = buf.slice(-seq.length);

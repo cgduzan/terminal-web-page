@@ -81,6 +81,7 @@ This whole site is a terminal. A few ways to explore:
   cat about.txt   read a file (you're reading one now)
   cd projects     change directory, then 'ls' again
   tree            see everything at once
+  fsn             3D filesystem navigator (Jurassic Park vibes)
   vi notes.txt    create / edit a file (saved in your browser)
   help            full command list
 

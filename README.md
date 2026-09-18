@@ -24,6 +24,7 @@ index.html        markup shell + script tags
 styles.css        themes (CSS vars per data-theme), block cursor, layout
 js/config.js      ← EDIT THIS: identity, fake filesystem content, themes
 js/commands.js    command registry (one entry per command)
+js/fsn.js         Jurassic Park–style 3D filesystem navigator overlay
 js/terminal.js    engine: boot, input, cursor, history, fs nav, autocomplete
 ```
 
@@ -59,4 +60,5 @@ about-me commands.
 - Theme switcher (`theme`), persisted to localStorage.
 - Deep links: `?cmd=neofetch` runs a command on load (and skips the intro).
 - Easter eggs: `sudo`, `sl`, `cowsay`, a locked `.secret`, and `matrix`.
+- `fsn` — Jurassic Park SGI-style 3D filesystem navigator (fly through the tree).
 - Respects `prefers-reduced-motion`.

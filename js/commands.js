@@ -700,4 +700,17 @@ TERM.commands = {
       ctx.term.matrix();
     },
   },
+
+  fsn: {
+    desc: "3D filesystem navigator (Jurassic Park)",
+    usage: "fsn [path]",
+    run(args, ctx) {
+      const segs = ctx.term.resolve(args[0] || ".");
+      const node = ctx.term.getNode(segs);
+      if (!node) return `fsn: ${args[0]}: No such file or directory`;
+      if (node.type !== "dir") return `fsn: ${args[0]}: Not a directory`;
+      ctx.print("It's a Unix system! I know this!");
+      ctx.term.fsn(segs);
+    },
+  },
 };
