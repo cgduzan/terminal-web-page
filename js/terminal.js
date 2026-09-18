@@ -1356,7 +1356,11 @@
       for (const sheet of Array.from(document.styleSheets)) {
         try {
           for (const rule of Array.from(sheet.cssRules || [])) {
-            cssText += rule.cssText + "\n";
+            // skip @font-face / url() — external assets taint the canvas
+            if (rule.type === CSSRule.FONT_FACE_RULE) continue;
+            const text = rule.cssText || "";
+            if (/url\s*\(/i.test(text)) continue;
+            cssText += text + "\n";
           }
         } catch (_) {
           /* cross-origin sheets (e.g. font CDN) — skip */
@@ -1406,8 +1410,8 @@
       }
     }
 
-    // Fullscreen black-hole implosion: capture the terminal, warp that
-    // bitmap into the singularity (fabric-into-drain), then hold black.
+    // Fullscreen black-hole implosion: capture the terminal, gravitationally
+    // lens it into a growing horizon with a Doppler-skewed accretion disk.
     async blackholeImplode() {
       if (document.querySelector(".blackhole-overlay")) return;
 
@@ -1458,201 +1462,297 @@
         resize();
         window.addEventListener("resize", resize);
 
-        // hide the live DOM; the canvas bitmap is what collapses
         win.classList.add("blackhole-hidden");
         document.body.classList.add("blackhole-active");
         beep();
 
-        const left = snap ? snap.rect.left : 16;
-        const top = snap ? snap.rect.top : 16;
-        const cssW = snap ? snap.width : w - 32; // CSS px (see captureWindow)
-        const cssH = snap ? snap.height : h - 32;
-        const dpr = snap ? snap.dpr : 1;
-        const src = snap ? snap.canvas : null;
+        const left = snap.rect.left;
+        const top = snap.rect.top;
+        const cssW = snap.width;
+        const cssH = snap.height;
+        const src = snap.canvas;
+        const sw = src.width;
+        const sh = src.height;
+        let srcPix = null;
+        try {
+          srcPix = src.getContext("2d").getImageData(0, 0, sw, sh).data;
+        } catch (_) {
+          // SVG foreignObject captures taint the canvas in Chromium — tiles still work
+          srcPix = null;
+        }
 
-        // tile mesh — each cell of the snapshot is pulled toward center
-        const COLS = 40;
-        const ROWS = 24;
+        // gravitational lens via tile mesh (works even when canvas is tainted)
+        const COLS = 36;
+        const ROWS = 22;
         const tileW = cssW / COLS;
         const tileH = cssH / ROWS;
-        const maxR =
-          Math.hypot(
-            Math.max(cx - left, left + cssW - cx),
-            Math.max(cy - top, top + cssH - cy)
-          ) || 1;
 
-        // shreds torn from the page (sample snapshot colors when available)
+        const renderLensedUI = (pull, rs) => {
+          ctx.imageSmoothingEnabled = pull < 0.75;
+          for (let row = 0; row < ROWS; row++) {
+            for (let col = 0; col < COLS; col++) {
+              const sx = col * tileW;
+              const sy = row * tileH;
+              const ox = left + sx + tileW / 2;
+              const oy = top + sy + tileH / 2;
+              const dx = ox - cx;
+              const dy = oy - cy;
+              const r = Math.hypot(dx, dy) || 0.001;
+
+              const u = Math.max(r / rs, 0.15);
+              const influence = Math.min(1, 2.6 / u);
+              const g = pull * (0.35 + 0.65 * pull);
+
+              const swirl = g * influence * 2.4 * Math.pow(1 / u, 1.6);
+              const ang0 = Math.atan2(dy, dx);
+              const ang = ang0 - swirl;
+
+              const bend = g * influence * (0.9 / Math.max(0.2, u - 0.7));
+              const move = Math.min(0.985, g * influence * (0.7 + bend * 0.25));
+              // fully swallowed tiles — skip (circular by fall amount, not a square hole)
+              if (move > 0.97) continue;
+
+              const rOut = Math.max(rs * 1.04, r * (1 - move));
+              const nx = cx + Math.cos(ang) * rOut;
+              const ny = cy + Math.sin(ang) * rOut;
+
+              const ring = Math.max(0, 1 - Math.abs(u - 1.4) / 1.2);
+              const stretch = 1 + move * 0.5 + ring * g * 1.8;
+              const squash = Math.max(0.12, 1 - move * 0.65 - ring * g * 0.35);
+              const sc = Math.max(0.03, 1 - move * 0.9);
+              const near = Math.max(0, 1 - (u - 1) / 2.0);
+
+              ctx.save();
+              ctx.translate(nx, ny);
+              ctx.rotate(ang);
+              ctx.scale(sc * stretch, sc * squash);
+              ctx.rotate(-ang);
+              // alpha-only fade near the horizon (no ctx.filter — that tanks the framerate)
+              ctx.globalAlpha = Math.max(0.18, 1 - near * pull * 0.8);
+              ctx.drawImage(
+                src,
+                sx * snap.dpr,
+                sy * snap.dpr,
+                Math.max(1, tileW * snap.dpr),
+                Math.max(1, tileH * snap.dpr),
+                -tileW / 2 - 0.5,
+                -tileH / 2 - 0.5,
+                tileW + 1,
+                tileH + 1
+              );
+              ctx.restore();
+            }
+          }
+          ctx.globalAlpha = 1;
+
+          // Soft-circularize the window silhouette so a dark rectangle doesn't
+          // flash behind the growing horizon on the pure-black overlay.
+          const edgeFade = Math.min(1, 0.2 + pull * 3.2);
+          if (edgeFade > 0.05) {
+            const vigR0 = Math.hypot(cssW, cssH) * 0.38;
+            const vigR1 = Math.hypot(cssW, cssH) * 0.7;
+            const vig = ctx.createRadialGradient(cx, cy, vigR0, cx, cy, vigR1);
+            vig.addColorStop(0, "rgba(0,0,0,0)");
+            vig.addColorStop(0.55, `rgba(0,0,0,${0.25 * edgeFade})`);
+            vig.addColorStop(1, `rgba(0,0,0,${0.95 * edgeFade})`);
+            ctx.fillStyle = vig;
+            ctx.fillRect(0, 0, w, h);
+          }
+        };
+
+        // sparse debris locked to the disk plane (not a full-screen starfield)
         const parts = [];
-        const nParts = 160;
-        let pix = null;
-        if (src) {
-          try {
-            pix = src.getContext("2d").getImageData(0, 0, src.width, src.height).data;
-          } catch (_) {
-            pix = null;
-          }
-        }
-        for (let i = 0; i < nParts; i++) {
-          const px = Math.random() * cssW;
-          const py = Math.random() * cssH;
+        for (let i = 0; i < 48; i++) {
+          const ang = Math.random() * Math.PI * 2;
+          const rad = 40 + Math.random() * Math.min(w, h) * 0.45;
           let r = 255;
-          let g = 160;
-          let b = 40;
-          if (pix) {
-            const ix = Math.min(src.width - 1, Math.floor(px * dpr));
-            const iy = Math.min(src.height - 1, Math.floor(py * dpr));
-            const o = (iy * src.width + ix) * 4;
-            r = pix[o];
-            g = pix[o + 1];
-            b = pix[o + 2];
+          let g = 170;
+          let b = 60;
+          if (srcPix) {
+            const px = Math.random() * cssW;
+            const py = Math.random() * cssH;
+            const ix = Math.min(sw - 1, Math.floor(px * snap.dpr));
+            const iy = Math.min(sh - 1, Math.floor(py * snap.dpr));
+            const o = (iy * sw + ix) * 4;
+            r = srcPix[o];
+            g = srcPix[o + 1];
+            b = srcPix[o + 2];
           }
-          const ang = Math.atan2(top + py - cy, left + px - cx);
-          const rad = Math.hypot(left + px - cx, top + py - cy);
           parts.push({
             ang,
             rad,
-            speed: 0.8 + Math.random() * 2.2,
-            size: 1 + Math.random() * 3,
+            speed: 0.6 + Math.random() * 1.4,
+            size: 0.8 + Math.random() * 2,
             r,
             g,
             b,
-            spin: (Math.random() - 0.5) * 0.2,
-            born: 0.15 + Math.random() * 0.45,
+            born: 0.12 + Math.random() * 0.35,
           });
         }
 
-        const DURATION = 2800;
+        const drawAccretion = (rs, pull) => {
+          // Always paint a circular silhouette first so we never flash a
+          // rectangular hole/glow as the horizon appears.
+          if (rs > 2) {
+            ctx.beginPath();
+            ctx.arc(cx, cy, rs, 0, Math.PI * 2);
+            ctx.fillStyle = "#000";
+            ctx.fill();
+          }
+
+          const alpha = Math.min(1, pull * 1.8);
+          if (alpha < 0.03 || rs < 5) return;
+
+          const blur = Math.min(18, Math.max(4, rs * 0.25)); // hard cap — large blur hitchs
+
+          // soft ambient glow — elliptical only (never fillRect)
+          const glow = ctx.createRadialGradient(cx, cy, rs * 0.9, cx, cy, rs * 4.5);
+          glow.addColorStop(0, `rgba(255,160,60,${0.2 * alpha})`);
+          glow.addColorStop(0.4, `rgba(255,100,30,${0.07 * alpha})`);
+          glow.addColorStop(1, "rgba(0,0,0,0)");
+          ctx.fillStyle = glow;
+          ctx.beginPath();
+          ctx.ellipse(cx, cy, rs * 5, rs * 3, 0, 0, Math.PI * 2);
+          ctx.fill();
+
+          // primary disk — continuous rings
+          for (let i = 0; i < 5; i++) {
+            ctx.beginPath();
+            ctx.ellipse(
+              cx,
+              cy,
+              rs * (1.85 + i * 0.28),
+              rs * (0.42 + i * 0.05),
+              -0.22,
+              0,
+              Math.PI * 2
+            );
+            ctx.strokeStyle = `rgba(255,${150 - i * 12},${45 + i * 8},${
+              alpha * (0.55 - i * 0.07)
+            })`;
+            ctx.lineWidth = rs * (0.18 - i * 0.015);
+            ctx.stroke();
+          }
+
+          // Doppler boost on the approaching (right) side
+          ctx.save();
+          ctx.beginPath();
+          ctx.rect(cx, 0, w - cx, h);
+          ctx.clip();
+          for (let i = 0; i < 3; i++) {
+            ctx.beginPath();
+            ctx.ellipse(
+              cx,
+              cy,
+              rs * (1.9 + i * 0.3),
+              rs * (0.44 + i * 0.05),
+              -0.22,
+              0,
+              Math.PI * 2
+            );
+            ctx.strokeStyle = `rgba(255,220,150,${alpha * (0.35 - i * 0.08)})`;
+            ctx.lineWidth = rs * 0.14;
+            ctx.stroke();
+          }
+          ctx.restore();
+
+          // lensed far-side wrap — capped shadowBlur to avoid end-of-anim stalls
+          ctx.save();
+          ctx.shadowColor = `rgba(255,180,80,${0.7 * alpha})`;
+          ctx.shadowBlur = blur;
+          ctx.beginPath();
+          ctx.ellipse(
+            cx,
+            cy - rs * 0.06,
+            rs * 2.0,
+            rs * 0.7,
+            0.04,
+            Math.PI * 1.12,
+            Math.PI * 1.88
+          );
+          ctx.strokeStyle = `rgba(255,215,150,${0.65 * alpha})`;
+          ctx.lineWidth = rs * 0.22;
+          ctx.stroke();
+          ctx.beginPath();
+          ctx.ellipse(
+            cx,
+            cy + rs * 0.04,
+            rs * 1.75,
+            rs * 0.42,
+            -0.04,
+            Math.PI * 0.12,
+            Math.PI * 0.88
+          );
+          ctx.strokeStyle = `rgba(255,140,60,${0.3 * alpha})`;
+          ctx.lineWidth = rs * 0.1;
+          ctx.stroke();
+          ctx.restore();
+
+          // photon ring
+          ctx.save();
+          ctx.shadowColor = "rgba(255,210,140,0.95)";
+          ctx.shadowBlur = Math.min(12, blur);
+          ctx.beginPath();
+          ctx.arc(cx, cy, rs * 1.06, 0, Math.PI * 2);
+          ctx.strokeStyle = `rgba(255,235,200,${0.85 * alpha})`;
+          ctx.lineWidth = Math.max(1.5, rs * 0.045);
+          ctx.stroke();
+          ctx.restore();
+
+          // re-stamp hard silhouette above the disk midplane
+          ctx.beginPath();
+          ctx.arc(cx, cy, rs, 0, Math.PI * 2);
+          ctx.fillStyle = "#000";
+          ctx.fill();
+        };
+
+        const DURATION = 3200;
         const t0 = performance.now();
         let raf = 0;
 
         const draw = (now) => {
           const t = Math.min(1, (now - t0) / DURATION);
-          // ease-in quadratic: fold reads earlier, still accelerates into the gulp
-          const pull = t * t;
+          const pull = t * t; // ease-in; fold readable early
 
           ctx.fillStyle = "#000";
           ctx.fillRect(0, 0, w, h);
 
-          // --- warped page (tile mesh → singularity) -----------------------
-          if (src) {
-            ctx.imageSmoothingEnabled = pull < 0.85;
+          // Schwarzschild radius grows as the hole "wins"
+          const rs = 4 + Math.pow(pull, 0.9) * Math.min(w, h) * 0.175;
 
-            // global suck toward center (continuous — no whole-image→mesh cut)
-            const globalSc = Math.max(0.02, 1 - pull * 0.92);
-            ctx.save();
-            ctx.translate(cx, cy);
-            ctx.rotate(pull * pull * 0.35);
-            ctx.scale(globalSc, globalSc);
-            ctx.translate(-cx, -cy);
+          renderLensedUI(pull, rs);
+          drawAccretion(rs, pull);
 
-            for (let row = 0; row < ROWS; row++) {
-              for (let col = 0; col < COLS; col++) {
-                const sx = col * tileW;
-                const sy = row * tileH;
-                const ox = left + sx + tileW / 2;
-                const oy = top + sy + tileH / 2;
-                const dx = cx - ox;
-                const dy = cy - oy;
-                const dist = Math.hypot(dx, dy) || 0.001;
-                const norm = Math.min(1, dist / maxR);
-
-                // center falls in first; edges trail behind (fabric → drain)
-                const local = Math.min(1, pull * (1.85 - norm * 0.65));
-                const p = Math.pow(local, 1.55);
-                if (p >= 0.992) continue;
-
-                const nx = ox + dx * p;
-                const ny = oy + dy * p;
-                const swirl = p * p * (3.4 + (1 - norm) * 2.8);
-                const sc = Math.max(0.015, 1 - p);
-                const radial = Math.atan2(dy, dx);
-                const stretch = 1 + p * 0.55;
-                const squash = Math.max(0.2, 1 - p * 0.45);
-
-                ctx.save();
-                ctx.translate(nx, ny);
-                ctx.rotate(swirl);
-                ctx.rotate(radial);
-                ctx.scale(sc * stretch, sc * squash);
-                ctx.rotate(-radial);
-                ctx.globalAlpha = Math.max(0, 1 - p * 0.7);
-                ctx.drawImage(
-                  src,
-                  sx * dpr,
-                  sy * dpr,
-                  Math.max(1, tileW * dpr),
-                  Math.max(1, tileH * dpr),
-                  -tileW / 2 - 0.5,
-                  -tileH / 2 - 0.5,
-                  tileW + 1,
-                  tileH + 1
-                );
-                ctx.restore();
-              }
-            }
-            ctx.restore();
-            ctx.globalAlpha = 1;
-          }
-
-          // --- accretion disk + event horizon (over the collapse) ----------
-          const holeR = 3 + Math.pow(pull, 1.2) * Math.min(w, h) * 0.38;
-          const ringAlpha = Math.min(1, pull * 1.4);
-
-          if (ringAlpha > 0.02) {
-            for (let i = 0; i < 6; i++) {
-              const r = holeR * (1.3 + i * 0.3) + 18 * (1 - pull);
-              ctx.beginPath();
-              ctx.ellipse(cx, cy, r * 1.7, r * 0.36, -0.4, 0, Math.PI * 2);
-              ctx.strokeStyle = `hsla(${22 + i * 10}, 98%, ${58 - i * 5}%, ${
-                (0.65 - i * 0.08) * ringAlpha
-              })`;
-              ctx.lineWidth = 1.5 + (5 - i) * 0.7;
-              ctx.shadowColor = `hsla(30, 100%, 55%, ${0.55 * ringAlpha})`;
-              ctx.shadowBlur = 10;
-              ctx.stroke();
-            }
-            ctx.shadowBlur = 0;
-
-            if (holeR > 4) {
-              const core = ctx.createRadialGradient(cx, cy, 0, cx, cy, holeR);
-              core.addColorStop(0, "#000");
-              core.addColorStop(0.7, "#000");
-              core.addColorStop(1, `rgba(255,140,40,${0.35 + pull * 0.5})`);
-              ctx.beginPath();
-              ctx.arc(cx, cy, holeR, 0, Math.PI * 2);
-              ctx.fillStyle = core;
-              ctx.fill();
-            }
-          }
-
-          if (t > 0.72) {
-            const flash = (t - 0.72) / 0.28;
-            ctx.beginPath();
-            ctx.arc(cx, cy, holeR * (1.05 + flash * 0.55), 0, Math.PI * 2);
-            ctx.strokeStyle = `rgba(255,230,180,${(1 - flash) * 0.95})`;
-            ctx.lineWidth = 2 + flash * 14;
-            ctx.stroke();
-          }
-
-          // --- page shreds spiraling in ------------------------------------
-          const suck = 0.6 + pull * 14;
+          // disk-plane debris only
+          const suck = 0.4 + pull * 10;
           for (const p of parts) {
             if (t < p.born) continue;
-            p.ang += p.spin + (p.speed * 0.014) / Math.max(0.08, p.rad / 160);
-            p.rad = Math.max(1, p.rad - suck * (0.35 + p.speed * 0.35));
-            const x = cx + Math.cos(p.ang) * p.rad * 1.55;
-            const y = cy + Math.sin(p.ang) * p.rad * 0.42;
-            const fade = Math.min(1, p.rad / 70);
+            p.ang += (p.speed * 0.02) / Math.max(0.12, p.rad / 180);
+            p.rad = Math.max(rs * 1.05, p.rad - suck * (0.25 + p.speed * 0.3));
+            if (p.rad <= rs * 1.08) continue;
+            const x = cx + Math.cos(p.ang) * p.rad * 1.7;
+            const y = cy + Math.sin(p.ang) * p.rad * 0.38;
+            const u = p.rad / rs;
+            const fade = Math.min(1, (u - 1) / 2) * (0.4 + pull * 0.6);
             ctx.beginPath();
-            ctx.arc(x, y, p.size * (0.7 + pull), 0, Math.PI * 2);
-            ctx.fillStyle = `rgba(${p.r},${p.g},${p.b},${0.85 * fade})`;
+            ctx.arc(x, y, p.size, 0, Math.PI * 2);
+            ctx.fillStyle = `rgba(${p.r},${p.g},${p.b},${0.75 * fade})`;
             ctx.fill();
           }
 
-          // final whiteout → black
-          if (t > 0.86) {
-            const k = (t - 0.86) / 0.14;
-            ctx.fillStyle = `rgba(255,240,200,${(1 - k) * 0.45})`;
+          // photon-ring flash as everything crosses
+          if (t > 0.78) {
+            const flash = (t - 0.78) / 0.22;
+            ctx.beginPath();
+            ctx.arc(cx, cy, rs * (1.05 + flash * 0.4), 0, Math.PI * 2);
+            ctx.strokeStyle = `rgba(255,235,200,${(1 - flash) * 0.9})`;
+            ctx.lineWidth = 2 + flash * 12;
+            ctx.stroke();
+          }
+
+          if (t > 0.88) {
+            const k = (t - 0.88) / 0.12;
+            ctx.fillStyle = `rgba(255,240,210,${(1 - k) * 0.4})`;
             ctx.fillRect(0, 0, w, h);
             ctx.fillStyle = `rgba(0,0,0,${k})`;
             ctx.fillRect(0, 0, w, h);
