@@ -1344,17 +1344,99 @@
       );
     }
 
-    // Fullscreen black-hole implosion: accretion-disk canvas over the
-    // window while CSS spins `.window` into the singularity. Auto-runs;
-    // no dismiss-early (it'd spoil the gag).
-    blackholeImplode() {
-      return new Promise((resolve) => {
-        if (document.querySelector(".blackhole-overlay")) {
-          resolve();
-          return;
-        }
+    // Snapshot `.window` to a canvas via SVG foreignObject (no deps).
+    // Falls back to null if the browser can't rasterize it.
+    async captureWindow(el) {
+      const rect = el.getBoundingClientRect();
+      const width = Math.max(1, Math.ceil(rect.width));
+      const height = Math.max(1, Math.ceil(rect.height));
+      const dpr = Math.min(window.devicePixelRatio || 1, 2);
 
-        const win = document.querySelector(".window");
+      let cssText = "";
+      for (const sheet of Array.from(document.styleSheets)) {
+        try {
+          for (const rule of Array.from(sheet.cssRules || [])) {
+            cssText += rule.cssText + "\n";
+          }
+        } catch (_) {
+          /* cross-origin sheets (e.g. font CDN) — skip */
+        }
+      }
+
+      const clone = el.cloneNode(true);
+      const inputs = el.querySelectorAll("input");
+      clone.querySelectorAll("input").forEach((node, i) => {
+        if (inputs[i]) node.setAttribute("value", inputs[i].value);
+      });
+
+      const theme = document.body.getAttribute("data-theme") || "solarized-dark";
+      const crt = document.body.classList.contains("crt") ? " crt" : "";
+      const xhtml =
+        `<div xmlns="http://www.w3.org/1999/xhtml" data-theme="${theme}" class="${crt.trim()}" ` +
+        `style="width:${width}px;height:${height}px;margin:0;padding:0;background:#000;` +
+        `font-family:Hack,'DejaVu Sans Mono','SF Mono',Menlo,Consolas,monospace;">` +
+        `<style>${cssText}\n.window{height:${height}px!important;box-shadow:none;}</style>` +
+        new XMLSerializer().serializeToString(clone) +
+        `</div>`;
+
+      const svg =
+        `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}">` +
+        `<foreignObject width="100%" height="100%">${xhtml}</foreignObject></svg>`;
+
+      const url = URL.createObjectURL(
+        new Blob([svg], { type: "image/svg+xml;charset=utf-8" })
+      );
+      try {
+        const img = new Image();
+        img.decoding = "sync";
+        await new Promise((res, rej) => {
+          img.onload = res;
+          img.onerror = rej;
+          img.src = url;
+        });
+        const snap = document.createElement("canvas");
+        snap.width = Math.round(width * dpr);
+        snap.height = Math.round(height * dpr);
+        const sctx = snap.getContext("2d");
+        sctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+        sctx.drawImage(img, 0, 0, width, height);
+        return { canvas: snap, rect, width, height, dpr };
+      } finally {
+        URL.revokeObjectURL(url);
+      }
+    }
+
+    // Fullscreen black-hole implosion: capture the terminal, warp that
+    // bitmap into the singularity (fabric-into-drain), then hold black.
+    async blackholeImplode() {
+      if (document.querySelector(".blackhole-overlay")) return;
+
+      const win = document.querySelector(".window");
+      let snap = null;
+      try {
+        snap = await this.captureWindow(win);
+      } catch (_) {
+        snap = null;
+      }
+      // if SVG capture fails, synthesize a solid stand-in so we still implode
+      if (!snap) {
+        const rect = win.getBoundingClientRect();
+        const width = Math.max(1, Math.ceil(rect.width));
+        const height = Math.max(1, Math.ceil(rect.height));
+        const dpr = Math.min(window.devicePixelRatio || 1, 2);
+        const c = document.createElement("canvas");
+        c.width = Math.round(width * dpr);
+        c.height = Math.round(height * dpr);
+        const cctx = c.getContext("2d");
+        cctx.scale(dpr, dpr);
+        cctx.fillStyle =
+          getComputedStyle(document.body).getPropertyValue("--bg").trim() ||
+          "#002b36";
+        cctx.fillRect(0, 0, width, height);
+        snap = { canvas: c, rect, width, height, dpr };
+      }
+
+      return new Promise((resolve) => {
         const overlay = document.createElement("div");
         overlay.className = "blackhole-overlay";
         const canvas = document.createElement("canvas");
@@ -1376,80 +1458,173 @@
         resize();
         window.addEventListener("resize", resize);
 
-        // debris particles spiraling into the event horizon
-        const N = Math.min(280, Math.floor((w * h) / 4500));
-        const parts = Array.from({ length: N }, () => ({
-          angle: Math.random() * Math.PI * 2,
-          radius: 60 + Math.random() * Math.max(w, h) * 0.78,
-          speed: 1.1 + Math.random() * 2.8,
-          size: 0.7 + Math.random() * 2.6,
-          hue: 18 + Math.random() * 42, // warm accretion glow
-          alpha: 0.4 + Math.random() * 0.6,
-        }));
-
-        const DURATION = 2600;
-        const t0 = performance.now();
-        let raf = 0;
-
-        win.classList.add("imploding");
+        // hide the live DOM; the canvas bitmap is what collapses
+        win.classList.add("blackhole-hidden");
         document.body.classList.add("blackhole-active");
         beep();
 
+        const left = snap ? snap.rect.left : 16;
+        const top = snap ? snap.rect.top : 16;
+        const cssW = snap ? snap.width : w - 32; // CSS px (see captureWindow)
+        const cssH = snap ? snap.height : h - 32;
+        const dpr = snap ? snap.dpr : 1;
+        const src = snap ? snap.canvas : null;
+
+        // tile mesh — each cell of the snapshot is pulled toward center
+        const COLS = 40;
+        const ROWS = 24;
+        const tileW = cssW / COLS;
+        const tileH = cssH / ROWS;
+        const maxR =
+          Math.hypot(
+            Math.max(cx - left, left + cssW - cx),
+            Math.max(cy - top, top + cssH - cy)
+          ) || 1;
+
+        // shreds torn from the page (sample snapshot colors when available)
+        const parts = [];
+        const nParts = 160;
+        let pix = null;
+        if (src) {
+          try {
+            pix = src.getContext("2d").getImageData(0, 0, src.width, src.height).data;
+          } catch (_) {
+            pix = null;
+          }
+        }
+        for (let i = 0; i < nParts; i++) {
+          const px = Math.random() * cssW;
+          const py = Math.random() * cssH;
+          let r = 255;
+          let g = 160;
+          let b = 40;
+          if (pix) {
+            const ix = Math.min(src.width - 1, Math.floor(px * dpr));
+            const iy = Math.min(src.height - 1, Math.floor(py * dpr));
+            const o = (iy * src.width + ix) * 4;
+            r = pix[o];
+            g = pix[o + 1];
+            b = pix[o + 2];
+          }
+          const ang = Math.atan2(top + py - cy, left + px - cx);
+          const rad = Math.hypot(left + px - cx, top + py - cy);
+          parts.push({
+            ang,
+            rad,
+            speed: 0.8 + Math.random() * 2.2,
+            size: 1 + Math.random() * 3,
+            r,
+            g,
+            b,
+            spin: (Math.random() - 0.5) * 0.2,
+            born: 0.15 + Math.random() * 0.45,
+          });
+        }
+
+        const DURATION = 2800;
+        const t0 = performance.now();
+        let raf = 0;
+
         const draw = (now) => {
           const t = Math.min(1, (now - t0) / DURATION);
-          // ease-in: slow drip, then violent collapse
-          const ease = t * t;
-          const pull = 0.55 + ease * 10;
+          // ease-in cubic: readable page, then hard collapse
+          const pull = t * t * t;
 
-          ctx.clearRect(0, 0, w, h);
-
-          // hole stays small until the terminal has visibly shrunk, then gulps
-          const holeR = 4 + Math.pow(ease, 1.4) * Math.min(w, h) * 0.42;
-
-          // soft edge darkening only — keep the center clear so `.window` shows
-          const vignette = ctx.createRadialGradient(
-            cx,
-            cy,
-            Math.min(w, h) * 0.25,
-            cx,
-            cy,
-            Math.max(w, h) * 0.7
-          );
-          vignette.addColorStop(0, "rgba(0,0,0,0)");
-          vignette.addColorStop(0.55, `rgba(0,0,0,${ease * 0.2})`);
-          vignette.addColorStop(1, `rgba(0,0,0,${0.15 + ease * 0.7})`);
-          ctx.fillStyle = vignette;
+          ctx.fillStyle = "#000";
           ctx.fillRect(0, 0, w, h);
 
-          // accretion disk rings (drawn ABOVE the window)
-          const ringAlpha = 0.2 + ease * 0.85;
-          for (let i = 0; i < 6; i++) {
-            const r = holeR * (1.35 + i * 0.32) + 28 * (1 - ease * 0.5);
-            ctx.beginPath();
-            ctx.ellipse(cx, cy, r * 1.7, r * 0.36, -0.4, 0, Math.PI * 2);
-            ctx.strokeStyle = `hsla(${22 + i * 10}, 98%, ${58 - i * 5}%, ${
-              (0.65 - i * 0.08) * ringAlpha
-            })`;
-            ctx.lineWidth = 1.5 + (5 - i) * 0.7;
-            ctx.shadowColor = `hsla(${30 + i * 6}, 100%, 55%, ${0.5 * ringAlpha})`;
-            ctx.shadowBlur = 10;
-            ctx.stroke();
-          }
-          ctx.shadowBlur = 0;
+          // --- warped page (tile mesh → singularity) -----------------------
+          if (src) {
+            ctx.imageSmoothingEnabled = pull < 0.85;
 
-          // event horizon core
-          if (holeR > 3) {
-            const core = ctx.createRadialGradient(cx, cy, 0, cx, cy, holeR);
-            core.addColorStop(0, "#000");
-            core.addColorStop(0.7, "#000");
-            core.addColorStop(1, `rgba(255,140,40,${0.35 + ease * 0.5})`);
-            ctx.beginPath();
-            ctx.arc(cx, cy, holeR, 0, Math.PI * 2);
-            ctx.fillStyle = core;
-            ctx.fill();
+            // global suck toward center (continuous — no whole-image→mesh cut)
+            const globalSc = Math.max(0.02, 1 - pull * 0.92);
+            ctx.save();
+            ctx.translate(cx, cy);
+            ctx.rotate(pull * pull * 0.35);
+            ctx.scale(globalSc, globalSc);
+            ctx.translate(-cx, -cy);
+
+            for (let row = 0; row < ROWS; row++) {
+              for (let col = 0; col < COLS; col++) {
+                const sx = col * tileW;
+                const sy = row * tileH;
+                const ox = left + sx + tileW / 2;
+                const oy = top + sy + tileH / 2;
+                const dx = cx - ox;
+                const dy = cy - oy;
+                const dist = Math.hypot(dx, dy) || 0.001;
+                const norm = Math.min(1, dist / maxR);
+
+                // center falls in first; edges trail behind (fabric → drain)
+                const local = Math.min(1, pull * (1.55 - norm * 0.7));
+                const p = local * local;
+                if (p >= 0.992) continue;
+
+                const nx = ox + dx * p;
+                const ny = oy + dy * p;
+                const swirl = p * p * (3.4 + (1 - norm) * 2.8);
+                const sc = Math.max(0.015, 1 - p);
+                const radial = Math.atan2(dy, dx);
+                const stretch = 1 + p * 0.55;
+                const squash = Math.max(0.2, 1 - p * 0.45);
+
+                ctx.save();
+                ctx.translate(nx, ny);
+                ctx.rotate(swirl);
+                ctx.rotate(radial);
+                ctx.scale(sc * stretch, sc * squash);
+                ctx.rotate(-radial);
+                ctx.globalAlpha = Math.max(0, 1 - p * 0.7);
+                ctx.drawImage(
+                  src,
+                  sx * dpr,
+                  sy * dpr,
+                  Math.max(1, tileW * dpr),
+                  Math.max(1, tileH * dpr),
+                  -tileW / 2 - 0.5,
+                  -tileH / 2 - 0.5,
+                  tileW + 1,
+                  tileH + 1
+                );
+                ctx.restore();
+              }
+            }
+            ctx.restore();
+            ctx.globalAlpha = 1;
           }
 
-          // photon-ring flash near the end
+          // --- accretion disk + event horizon (over the collapse) ----------
+          const holeR = 3 + Math.pow(pull, 1.2) * Math.min(w, h) * 0.38;
+          const ringAlpha = Math.min(1, pull * 1.4);
+
+          if (ringAlpha > 0.02) {
+            for (let i = 0; i < 6; i++) {
+              const r = holeR * (1.3 + i * 0.3) + 18 * (1 - pull);
+              ctx.beginPath();
+              ctx.ellipse(cx, cy, r * 1.7, r * 0.36, -0.4, 0, Math.PI * 2);
+              ctx.strokeStyle = `hsla(${22 + i * 10}, 98%, ${58 - i * 5}%, ${
+                (0.65 - i * 0.08) * ringAlpha
+              })`;
+              ctx.lineWidth = 1.5 + (5 - i) * 0.7;
+              ctx.shadowColor = `hsla(30, 100%, 55%, ${0.55 * ringAlpha})`;
+              ctx.shadowBlur = 10;
+              ctx.stroke();
+            }
+            ctx.shadowBlur = 0;
+
+            if (holeR > 4) {
+              const core = ctx.createRadialGradient(cx, cy, 0, cx, cy, holeR);
+              core.addColorStop(0, "#000");
+              core.addColorStop(0.7, "#000");
+              core.addColorStop(1, `rgba(255,140,40,${0.35 + pull * 0.5})`);
+              ctx.beginPath();
+              ctx.arc(cx, cy, holeR, 0, Math.PI * 2);
+              ctx.fillStyle = core;
+              ctx.fill();
+            }
+          }
+
           if (t > 0.72) {
             const flash = (t - 0.72) / 0.28;
             ctx.beginPath();
@@ -1459,34 +1634,25 @@
             ctx.stroke();
           }
 
-          // reveal particles gradually so the terminal stays readable early
-          const reveal = 0.12 + ease * 0.88;
-          const nDraw = Math.floor(parts.length * reveal);
-          for (let i = 0; i < nDraw; i++) {
-            const p = parts[i];
-            p.angle += (p.speed * 0.016) / Math.max(0.08, p.radius / 180);
-            p.radius = Math.max(2, p.radius - pull * (0.45 + p.speed * 0.4));
-            const x = cx + Math.cos(p.angle) * p.radius * 1.65;
-            const y = cy + Math.sin(p.angle) * p.radius * 0.4;
-            const fade = Math.min(1, p.radius / 90) * (0.35 + ease * 0.65);
-            const tx = cx + Math.cos(p.angle - 0.12) * p.radius * 1.65;
-            const ty = cy + Math.sin(p.angle - 0.12) * p.radius * 0.4;
+          // --- page shreds spiraling in ------------------------------------
+          const suck = 0.6 + pull * 14;
+          for (const p of parts) {
+            if (t < p.born) continue;
+            p.ang += p.spin + (p.speed * 0.014) / Math.max(0.08, p.rad / 160);
+            p.rad = Math.max(1, p.rad - suck * (0.35 + p.speed * 0.35));
+            const x = cx + Math.cos(p.ang) * p.rad * 1.55;
+            const y = cy + Math.sin(p.ang) * p.rad * 0.42;
+            const fade = Math.min(1, p.rad / 70);
             ctx.beginPath();
-            ctx.moveTo(tx, ty);
-            ctx.lineTo(x, y);
-            ctx.strokeStyle = `hsla(${p.hue}, 95%, 62%, ${p.alpha * fade * 0.7})`;
-            ctx.lineWidth = p.size;
-            ctx.stroke();
-            ctx.beginPath();
-            ctx.arc(x, y, p.size * 0.55, 0, Math.PI * 2);
-            ctx.fillStyle = `hsla(${p.hue}, 100%, 70%, ${p.alpha * fade})`;
+            ctx.arc(x, y, p.size * (0.7 + pull), 0, Math.PI * 2);
+            ctx.fillStyle = `rgba(${p.r},${p.g},${p.b},${0.85 * fade})`;
             ctx.fill();
           }
 
-          // final whiteout → total black as everything crosses the horizon
+          // final whiteout → black
           if (t > 0.86) {
             const k = (t - 0.86) / 0.14;
-            ctx.fillStyle = `rgba(255,240,200,${(1 - k) * 0.5})`;
+            ctx.fillStyle = `rgba(255,240,200,${(1 - k) * 0.45})`;
             ctx.fillRect(0, 0, w, h);
             ctx.fillStyle = `rgba(0,0,0,${k})`;
             ctx.fillRect(0, 0, w, h);
@@ -1495,10 +1661,8 @@
           if (t < 1) {
             raf = requestAnimationFrame(draw);
           } else {
-            // hold on pure black so the snap-back doesn't feel instant
             ctx.fillStyle = "#000";
             ctx.fillRect(0, 0, w, h);
-            win.classList.add("blackhole-hidden");
             setTimeout(cleanup, 2800);
           }
         };
@@ -1507,11 +1671,11 @@
           cancelAnimationFrame(raf);
           window.removeEventListener("resize", resize);
           overlay.remove();
-          win.classList.remove("imploding", "blackhole-hidden");
+          win.classList.remove("blackhole-hidden");
           document.body.classList.remove("blackhole-active");
-          // force layout so the next paint isn't stuck at scale(0)
           void win.offsetWidth;
           beep();
+          this.focus();
           resolve();
         };
 
