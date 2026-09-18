@@ -2,8 +2,8 @@ import * as pulumi from "@pulumi/pulumi";
 import * as aws from "@pulumi/aws";
 
 // --- Constants -------------------------------------------------------------
-const domain = "cgduzan.com";
-const zoneId = "Z10261411FI9LG0EU7FYU"; // existing public hosted zone (apex)
+const domain = "term.cgduzan.com";
+const zoneId = "Z10261411FI9LG0EU7FYU"; // existing public hosted zone (cgduzan.com)
 
 // AWS managed cache policy "CachingOptimized".
 const CACHING_OPTIMIZED = "658327ea-f89d-4fab-a63d-7e88639e58f6";
@@ -103,21 +103,21 @@ new aws.s3.BucketPolicy("site-policy", {
     ),
 });
 
-// --- Route53 apex ALIAS records -> CloudFront ------------------------------
+// --- Route53 subdomain ALIAS records -> CloudFront -------------------------
 const aliasTarget = {
     name: cdn.domainName,
     zoneId: cdn.hostedZoneId,
     evaluateTargetHealth: false,
 };
 
-new aws.route53.Record("apex-a", {
+new aws.route53.Record("term-a", {
     zoneId: zoneId,
     name: domain,
     type: "A",
     aliases: [aliasTarget],
 });
 
-new aws.route53.Record("apex-aaaa", {
+new aws.route53.Record("term-aaaa", {
     zoneId: zoneId,
     name: domain,
     type: "AAAA",

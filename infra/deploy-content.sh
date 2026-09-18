@@ -29,4 +29,4 @@ aws s3 cp index.html "s3://$BUCKET/index.html" \
   --content-type "text/html"
 
 aws cloudfront create-invalidation --distribution-id "$DIST" --paths "/*" >/dev/null
-echo "Deployed. https://cgduzan.com  (invalidation in flight, ~30-60s)"
+echo "Deployed. https://term.cgduzan.com  (invalidation in flight, ~30-60s)"

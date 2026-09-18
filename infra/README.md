@@ -1,7 +1,8 @@
-# infra — hosting for cgduzan.com
+# infra — hosting for term.cgduzan.com
 
-Static site hosted on AWS: private **S3** + **OAC** → **CloudFront** (HTTPS, apex,
-`403/404 → /index.html`) → **ACM** cert (us-east-1) → **Route53** apex A/AAAA alias.
+Static site hosted on AWS: private **S3** + **OAC** → **CloudFront** (HTTPS,
+`term.cgduzan.com`, `403/404 → /index.html`) → **ACM** cert (us-east-1) →
+**Route53** subdomain A/AAAA alias on the `cgduzan.com` hosted zone.
 Provisioned with **Pulumi** (TypeScript); state in a self-managed **S3 backend**.
 Content is deployed **one-shot** (not CI), because the easter-egg media is gitignored.
 
